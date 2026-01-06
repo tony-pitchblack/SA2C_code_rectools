@@ -1,6 +1,6 @@
 name: sa2c_code_tf
 dependencies:
-  - python=3.7
+  - python=3.8
   - pip
   - requests=2.32.3
   - fastparquet
