@@ -10,14 +10,14 @@ python Kaggle/SA2C_SASRec_torch.py \
   --data Kaggle/data \
   --batch_size 512 \
   --num_workers 0 \
-  --device_id 0 \
+  --device_id 2 \
   --max_steps 2
 python Kaggle/SA2C_SASRec_torch.py \
   --model SASRec \
   --data Kaggle/data \
   --batch_size 512 \
   --num_workers 0 \
-  --device_id 0
+  --device_id 2
 
 ## Install conda envs (torch / tf)
 conda env create -f dependencies/environment_torch.yml
