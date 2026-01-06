@@ -9,7 +9,7 @@ python Kaggle/SA2C_SASRec_torch.py \
   --model SASRec \
   --data Kaggle/data \
   --batch_size 512 \
-  --max_steps 2 && \
+  --max_steps 2
 python Kaggle/SA2C_SASRec_torch.py \
   --model SASRec \
   --data Kaggle/data
