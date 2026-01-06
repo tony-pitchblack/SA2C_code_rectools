@@ -17,6 +17,8 @@ class SASRecBlock(nn.Module):
 
     def forward(self, x, attn_mask, key_padding_mask):
         y = self.ln1(x)
+        if key_padding_mask is not None:
+            y = y.masked_fill(key_padding_mask.unsqueeze(-1), 0.0)
         attn_out, _ = self.attn(
             y,
             y,
@@ -66,6 +68,11 @@ class SASRecQNetworkTorch(nn.Module):
         x = x * seq_mask
 
         key_padding_mask = inputs == self.pad_id
+        if key_padding_mask.any():
+            all_pad = key_padding_mask.all(dim=1)
+            if all_pad.any():
+                key_padding_mask = key_padding_mask.clone()
+                key_padding_mask[all_pad, 0] = False
         attn_mask = self.causal_attn_mask[:seqlen, :seqlen]
         for blk in self.blocks:
             x = blk(x, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
