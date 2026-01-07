@@ -6,8 +6,19 @@ rsync -a "${SA2C_code_unzip_dir}/RC15/data/" "RC15/data/"
 ## Run Torch (uv + local .venv) — SASRec only
 conda activate sa2c_code_torch
 
+## retailrocket
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default_rectools.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only_rectools.yaml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only_rectools_ndcg.yml
+
+## yoochoose
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default_rectools.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only_rectools.yaml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only_rectools_ndcg.yml
 
 ## Install conda envs (torch / tf)
 conda env create -f dependencies/environment_torch.yml

@@ -3,7 +3,10 @@ dataset: yoochoose
 data: data
 epoch: 50
 
-batch_size_train: 27000 # ~29GB GPU mem
+purchase_only: false
+use_rectoools_backbone: true
+
+batch_size_train: 27000 # ~30GB GPU mem
 batch_size_val: 256
 num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
 num_workers_val: 0
