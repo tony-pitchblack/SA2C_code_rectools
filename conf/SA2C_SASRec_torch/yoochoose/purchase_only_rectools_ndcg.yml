@@ -7,7 +7,7 @@ purchase_only: true
 use_rectoools_backbone: true
 reward_fn: ndcg
 
-batch_size_train: 27000  # ~29GB GPU mem
+batch_size_train: 24000  # ~31GB GPU mem
 batch_size_val: 256
 num_workers_train: 4
 num_workers_val: 0
