@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 from SASRecModules_torch import SASRecQNetworkTorch
 
@@ -22,6 +23,7 @@ def parse_args():
     parser.add_argument("--epoch", type=int, default=50, help="Number of max epochs.")
     parser.add_argument("--data", nargs="?", default="data", help="data directory")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size.")
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
     parser.add_argument(
         "--hidden_factor",
         type=int,
@@ -195,9 +197,11 @@ def evaluate(model, data_directory, state_size, item_num, reward_click, reward_b
         inputs = torch.as_tensor(np.asarray(states, dtype=np.int64), device=device)
         lens = torch.as_tensor(np.asarray(len_states, dtype=np.int64), device=device)
         _, ce_logits = model(inputs, lens)
-        prediction = ce_logits.detach().cpu().numpy()
-
-        sorted_list = np.argsort(prediction, axis=1)
+        kmax = int(max(topk))
+        vals, idx = torch.topk(ce_logits, k=kmax, dim=1, largest=True, sorted=False)
+        order = vals.argsort(dim=1)
+        idx_sorted = idx.gather(1, order)
+        sorted_list = idx_sorted.detach().cpu().numpy()
         calculate_hit(
             sorted_list,
             topk,
@@ -238,6 +242,32 @@ def evaluate(model, data_directory, state_size, item_num, reward_click, reward_b
         print(f"purchase hr and ndcg @{k} : {hr_purchase:f}, {ng_purchase:f}")
     print(f"off-line corrected evaluation (click_ng,purchase_ng)@10: {off_click_ng_val:f}, {off_purchase_ng_val:f}")
     print("#############################################################")
+
+
+class _ReplayBufferDataset(Dataset):
+    def __init__(self, state, len_state, next_state, len_next_state, action, is_buy, is_done):
+        super().__init__()
+        self.state = state
+        self.len_state = len_state
+        self.next_state = next_state
+        self.len_next_state = len_next_state
+        self.action = action
+        self.is_buy = is_buy
+        self.is_done = is_done
+
+    def __len__(self):
+        return int(self.action.shape[0])
+
+    def __getitem__(self, idx):
+        return (
+            self.state[idx],
+            self.len_state[idx],
+            self.next_state[idx],
+            self.len_next_state[idx],
+            self.action[idx],
+            self.is_buy[idx],
+            self.is_done[idx],
+        )
 
 
 def main():
@@ -289,27 +319,57 @@ def main():
     num_rows = replay_buffer.shape[0]
     num_batches = int(num_rows / args.batch_size)
 
+    state_all = torch.from_numpy(np.asarray(replay_buffer["state"].tolist(), dtype=np.int64))
+    len_state_all = torch.from_numpy(np.asarray(replay_buffer["len_state"].to_numpy(), dtype=np.int64))
+    next_state_all = torch.from_numpy(np.asarray(replay_buffer["next_state"].tolist(), dtype=np.int64))
+    len_next_state_all = torch.from_numpy(np.asarray(replay_buffer["len_next_states"].to_numpy(), dtype=np.int64))
+    action_all = torch.from_numpy(np.asarray(replay_buffer["action"].to_numpy(), dtype=np.int64))
+    is_buy_all = torch.from_numpy(np.asarray(replay_buffer["is_buy"].to_numpy(), dtype=np.int64))
+    done_all = torch.from_numpy(np.asarray(replay_buffer["is_done"].to_numpy(), dtype=np.bool_))
+
+    ds = _ReplayBufferDataset(
+        state=state_all,
+        len_state=len_state_all,
+        next_state=next_state_all,
+        len_next_state=len_next_state_all,
+        action=action_all,
+        is_buy=is_buy_all,
+        is_done=done_all,
+    )
+
+    pin_memory = device.type == "cuda"
+    persistent_workers = args.num_workers > 0
+
+    behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
+    for k, v in pop_dict.items():
+        kk = int(k)
+        if 0 <= kk <= item_num:
+            behavior_prob_table[kk] = float(v)
+    behavior_prob_table = behavior_prob_table.to(device)
+
     for _ in range(args.epoch):
-        for _ in tqdm(
-            range(num_batches),
+        sampler = RandomSampler(ds, replacement=True, num_samples=num_batches * int(args.batch_size))
+        dl = DataLoader(
+            ds,
+            batch_size=int(args.batch_size),
+            sampler=sampler,
+            num_workers=int(args.num_workers),
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
+            drop_last=True,
+        )
+        for batch in tqdm(
+            dl,
+            total=num_batches,
             desc=f"epoch {_ + 1}/{args.epoch}",
             unit="batch",
             dynamic_ncols=True,
         ):
             if args.max_steps > 0 and total_step >= args.max_steps:
                 return
-            batch = replay_buffer.sample(n=args.batch_size)
-
-            state = np.asarray(list(batch["state"].values), dtype=np.int64)
-            len_state = np.asarray(list(batch["len_state"].values), dtype=np.int64)
-            next_state = np.asarray(list(batch["next_state"].values), dtype=np.int64)
-            len_next_state = np.asarray(list(batch["len_next_states"].values), dtype=np.int64)
-            action = np.asarray(list(batch["action"].values), dtype=np.int64)
-            is_buy = np.asarray(list(batch["is_buy"].values), dtype=np.int64)
-            is_done = np.asarray(list(batch["is_done"].values), dtype=np.bool_)
-
-            reward = np.where(is_buy == 1, reward_buy, reward_click).astype(np.float32)
-            discount = np.full(shape=(action.shape[0],), fill_value=float(args.discount), dtype=np.float32)
+            state, len_state, next_state, len_next_state, action, is_buy, is_done = batch
+            reward = torch.where(is_buy == 1, reward_buy, reward_click).to(torch.float32)
+            discount = torch.full_like(reward, float(args.discount), dtype=torch.float32)
 
             pointer = np.random.randint(0, 2)
             if pointer == 0:
@@ -322,14 +382,14 @@ def main():
             main_qn.train()
             target_qn.train()
 
-            state_t = torch.as_tensor(state, device=device)
-            len_state_t = torch.as_tensor(len_state, device=device)
-            next_state_t = torch.as_tensor(next_state, device=device)
-            len_next_state_t = torch.as_tensor(len_next_state, device=device)
-            action_t = torch.as_tensor(action, device=device, dtype=torch.long)
-            reward_t = torch.as_tensor(reward, device=device)
-            discount_t = torch.as_tensor(discount, device=device)
-            done_t = torch.as_tensor(is_done, device=device, dtype=torch.float32)
+            state_t = state.to(device, non_blocking=pin_memory)
+            len_state_t = len_state.to(device, non_blocking=pin_memory)
+            next_state_t = next_state.to(device, non_blocking=pin_memory)
+            len_next_state_t = len_next_state.to(device, non_blocking=pin_memory)
+            action_t = action.to(device, non_blocking=pin_memory).to(torch.long)
+            reward_t = reward.to(device, non_blocking=pin_memory)
+            discount_t = discount.to(device, non_blocking=pin_memory)
+            done_t = is_done.to(device, non_blocking=pin_memory).to(torch.float32)
 
             neg_actions_t = _sample_negative_actions(item_num, action_t, args.neg, device=device)
 
@@ -337,7 +397,6 @@ def main():
                 q_next_target, _ = target_qn(next_state_t, len_next_state_t)
                 q_next_selector, _ = main_qn(next_state_t, len_next_state_t)
                 q_curr_target, _ = target_qn(state_t, len_state_t)
-                q_curr_selector, _ = main_qn(state_t, len_state_t)
 
             q_values, ce_logits = main_qn(state_t, len_state_t)
 
@@ -347,7 +406,7 @@ def main():
             q_sa = q_values.gather(1, action_t[:, None]).squeeze(1)
             qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
 
-            a_star_curr = q_curr_selector.argmax(dim=1)
+            a_star_curr = q_values.detach().argmax(dim=1)
             q_t_star = q_curr_target.gather(1, a_star_curr[:, None]).squeeze(1)
             target_neg = reward_negative + discount_t * q_t_star
             q_sneg = q_values.gather(1, neg_actions_t)
@@ -366,7 +425,7 @@ def main():
             else:
                 with torch.no_grad():
                     prob = F.softmax(ce_logits, dim=1).gather(1, action_t[:, None]).squeeze(1)
-                behavior_prob = torch.as_tensor([float(pop_dict[int(a)]) for a in action], device=device)
+                behavior_prob = behavior_prob_table[action_t]
                 ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(args.smooth))
 
                 with torch.no_grad():
