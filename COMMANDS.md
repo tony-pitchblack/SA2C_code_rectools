@@ -4,6 +4,7 @@ rsync -a "${SA2C_code_unzip_dir}/Kaggle/data/" "Kaggle/data/"
 rsync -a "${SA2C_code_unzip_dir}/RC15/data/" "RC15/data/"
 
 ## Run Torch (uv + local .venv) — SASRec only
+conda activate sa2c_code_torch
 python Kaggle/SA2C_SASRec_torch.py \
   --model SASRec \
   --data Kaggle/data \
