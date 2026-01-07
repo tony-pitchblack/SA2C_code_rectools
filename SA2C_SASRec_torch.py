@@ -37,6 +37,7 @@ def _default_config():
         "epoch": 50,
         "dataset": "retailrocket",
         "data": "data",
+        "purchase_only": False,
         "batch_size_train": 256,
         "batch_size_val": 256,
         "num_workers_train": 0,
@@ -253,15 +254,25 @@ def evaluate(model, val_loader, reward_click, device, debug=False):
 
 
 class _ReplayBufferDataset(Dataset):
-    def __init__(self, state, len_state, next_state, len_next_state, action, is_buy, is_done):
+    def __init__(self, state, len_state, next_state, len_next_state, action, is_buy, is_done, purchase_only: bool = False):
         super().__init__()
-        self.state = state
-        self.len_state = len_state
-        self.next_state = next_state
-        self.len_next_state = len_next_state
-        self.action = action
-        self.is_buy = is_buy
-        self.is_done = is_done
+        if purchase_only:
+            mask = is_buy == 1
+            self.state = state[mask]
+            self.len_state = len_state[mask]
+            self.next_state = next_state[mask]
+            self.len_next_state = len_next_state[mask]
+            self.action = action[mask]
+            self.is_buy = is_buy[mask]
+            self.is_done = is_done[mask]
+        else:
+            self.state = state
+            self.len_state = len_state
+            self.next_state = next_state
+            self.len_next_state = len_next_state
+            self.action = action
+            self.is_buy = is_buy
+            self.is_done = is_done
 
     def __len__(self):
         return int(self.action.shape[0])
@@ -279,12 +290,19 @@ class _ReplayBufferDataset(Dataset):
 
 
 class _ValDataset(Dataset):
-    def __init__(self, state, len_state, action, reward):
+    def __init__(self, state, len_state, action, reward, reward_click: float, purchase_only: bool = False):
         super().__init__()
-        self.state = state
-        self.len_state = len_state
-        self.action = action
-        self.reward = reward
+        if purchase_only:
+            mask = reward != float(reward_click)
+            self.state = state[mask]
+            self.len_state = len_state[mask]
+            self.action = action[mask]
+            self.reward = reward[mask]
+        else:
+            self.state = state
+            self.len_state = len_state
+            self.action = action
+            self.reward = reward
 
     def __len__(self):
         return int(self.action.shape[0])
@@ -328,6 +346,7 @@ def _build_eval_dataset(
     item_num,
     reward_click,
     reward_buy,
+    purchase_only: bool = False,
 ):
     state, len_state, action, reward = _build_eval_tensors(
         data_directory=data_directory,
@@ -337,7 +356,14 @@ def _build_eval_dataset(
         reward_click=reward_click,
         reward_buy=reward_buy,
     )
-    return _ValDataset(state, len_state, action, reward)
+    return _ValDataset(
+        state=state,
+        len_state=len_state,
+        action=action,
+        reward=reward,
+        reward_click=float(reward_click),
+        purchase_only=bool(purchase_only),
+    )
 
 
 def _make_eval_loader(
@@ -429,6 +455,7 @@ def main():
     reward_click = float(cfg.get("r_click", 0.2))
     reward_buy = float(cfg.get("r_buy", 1.0))
     reward_negative = float(cfg.get("r_negative", -0.0))
+    purchase_only = bool(cfg.get("purchase_only", False))
 
     train_batch_size = int(cfg.get("batch_size_train", 256))
     val_batch_size = int(cfg.get("batch_size_val", 256))
@@ -489,6 +516,7 @@ def main():
         action=action_all,
         is_buy=is_buy_all,
         is_done=done_all,
+        purchase_only=purchase_only,
     )
     train_ds_s = time.perf_counter() - t0
 
@@ -502,6 +530,7 @@ def main():
         item_num=item_num,
         reward_click=reward_click,
         reward_buy=reward_buy,
+        purchase_only=purchase_only,
     )
     val_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -516,6 +545,7 @@ def main():
         item_num=item_num,
         reward_click=reward_click,
         reward_buy=reward_buy,
+        purchase_only=purchase_only,
     )
     test_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
