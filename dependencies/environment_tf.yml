@@ -1,0 +1,19 @@
+name: sa2c_code_tf
+dependencies:
+  - python=3.7
+  - pip
+  - requests=2.32.3
+  - fastparquet
+  - pyarrow
+  - mlflow=3.8.0
+  - python-dotenv=1.0.1
+  - numpy=1.19.5
+  - pandas=1.1.5
+  - tqdm=4.66.1
+  - scikit-learn=0.24.2
+  - pip:
+      - protobuf==3.20.3
+      - tensorflow==1.15.5
+      - trfl==1.2.0
+      - gdownload==0.1.1
+

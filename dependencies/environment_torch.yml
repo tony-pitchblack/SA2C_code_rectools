@@ -1,0 +1,15 @@
+name: sa2c_code_torch
+dependencies:
+  - python=3.11
+  - pip
+  - requests=2.32.3
+  - fastparquet
+  - pyarrow
+  - mlflow=3.8.0
+  - python-dotenv=1.0.1
+  - pip:
+      - torch==2.2.0+cu121
+      - pytorch-lightning>=2.4.0
+      - gdownload==0.1.1
+
+
