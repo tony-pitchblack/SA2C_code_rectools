@@ -2,6 +2,7 @@
 # Project / IDE files #
 ######################
 
+*.zip
 .DS_Store
 .cursor/
 .vscode/
