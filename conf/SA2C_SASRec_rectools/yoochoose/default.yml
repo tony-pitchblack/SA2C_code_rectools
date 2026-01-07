@@ -5,7 +5,7 @@ epoch: 80
 
 purchase_only: false
 
-batch_size_train: 1024
+batch_size_train: 1280 # ~31GB GPU mem
 batch_size_val: 128
 num_workers_train: 4
 num_workers_val: 0
