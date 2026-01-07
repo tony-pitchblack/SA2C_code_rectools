@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -365,16 +366,13 @@ def _build_eval_tensors(data_directory, split_df_name, state_size, item_num, rew
     return state_t, len_state_t, action_t, reward_t
 
 
-def _make_eval_loader(
+def _build_eval_dataset(
     data_directory,
     split_df_name,
     state_size,
     item_num,
     reward_click,
     reward_buy,
-    batch_size,
-    num_workers,
-    pin_memory,
 ):
     state, len_state, action, reward = _build_eval_tensors(
         data_directory=data_directory,
@@ -384,7 +382,15 @@ def _make_eval_loader(
         reward_click=reward_click,
         reward_buy=reward_buy,
     )
-    ds = _ValDataset(state, len_state, action, reward)
+    return _ValDataset(state, len_state, action, reward)
+
+
+def _make_eval_loader(
+    ds,
+    batch_size,
+    num_workers,
+    pin_memory,
+):
     persistent_workers = num_workers > 0
     return DataLoader(
         ds,
@@ -484,6 +490,7 @@ def main():
             int(train_batch_size),
         )
 
+    t0 = time.perf_counter()
     state_all = torch.from_numpy(np.asarray(replay_buffer["state"].tolist(), dtype=np.int64))
     len_state_all = torch.from_numpy(np.asarray(replay_buffer["len_state"].to_numpy(), dtype=np.int64))
     next_state_all = torch.from_numpy(np.asarray(replay_buffer["next_state"].tolist(), dtype=np.int64))
@@ -501,20 +508,37 @@ def main():
         is_buy=is_buy_all,
         is_done=done_all,
     )
+    train_ds_s = time.perf_counter() - t0
 
     pin_memory = device.type == "cuda"
     train_persistent_workers = train_num_workers > 0
-    val_dl = _make_eval_loader(
+    t0 = time.perf_counter()
+    val_ds = _build_eval_dataset(
         data_directory=data_directory,
         split_df_name="sampled_val.df",
         state_size=state_size,
         item_num=item_num,
         reward_click=reward_click,
         reward_buy=reward_buy,
-        batch_size=val_batch_size,
-        num_workers=val_num_workers,
-        pin_memory=pin_memory,
     )
+    val_ds_s = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    val_dl = _make_eval_loader(val_ds, val_batch_size, val_num_workers, pin_memory)
+    val_dl_s = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    test_ds = _build_eval_dataset(
+        data_directory=data_directory,
+        split_df_name="sampled_test.df",
+        state_size=state_size,
+        item_num=item_num,
+        reward_click=reward_click,
+        reward_buy=reward_buy,
+    )
+    test_ds_s = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    test_dl = _make_eval_loader(test_ds, val_batch_size, val_num_workers, pin_memory)
+    test_dl_s = time.perf_counter() - t0
 
     behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
     for k, v in pop_dict.items():
@@ -540,6 +564,7 @@ def main():
                 int(total_step),
             )
         sampler = RandomSampler(ds, replacement=True, num_samples=num_batches * int(train_batch_size))
+        t0 = time.perf_counter()
         dl = DataLoader(
             ds,
             batch_size=int(train_batch_size),
@@ -549,6 +574,17 @@ def main():
             persistent_workers=train_persistent_workers,
             drop_last=True,
         )
+        train_dl_s = time.perf_counter() - t0
+        if epoch_idx == 0:
+            logger.info(
+                "build_s train_ds=%.3f train_dl=%.3f val_ds=%.3f val_dl=%.3f test_ds=%.3f test_dl=%.3f",
+                float(train_ds_s),
+                float(train_dl_s),
+                float(val_ds_s),
+                float(val_dl_s),
+                float(test_ds_s),
+                float(test_dl_s),
+            )
         for batch in tqdm(
             dl,
             total=num_batches,
@@ -677,18 +713,6 @@ def main():
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
     ).to(device)
     best_model.load_state_dict(torch.load(best_path, map_location=device))
-
-    test_dl = _make_eval_loader(
-        data_directory=data_directory,
-        split_df_name="sampled_test.df",
-        state_size=state_size,
-        item_num=item_num,
-        reward_click=reward_click,
-        reward_buy=reward_buy,
-        batch_size=val_batch_size,
-        num_workers=val_num_workers,
-        pin_memory=pin_memory,
-    )
 
     val_best = evaluate(best_model, val_dl, reward_click, pop_dict, device, debug=bool(cfg.get("debug", False)))
     test_best = evaluate(best_model, test_dl, reward_click, pop_dict, device, debug=bool(cfg.get("debug", False)))
