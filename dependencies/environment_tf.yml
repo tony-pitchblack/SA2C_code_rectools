@@ -1,3 +1,4 @@
+# TODO: resolve requests=2.32.3 vs python=3.8 for tensorflow=1.* conflict
 name: sa2c_code_tf
 dependencies:
   - python=3.8
