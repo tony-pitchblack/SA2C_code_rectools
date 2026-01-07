@@ -1,7 +1,7 @@
 seed: 0
 dataset: retailrocket
 data: data
-epoch: 50
+epoch: 80
 
 purchase_only: false
 use_rectoools_backbone: true
@@ -32,6 +32,6 @@ lr_2: 0.001
 max_steps: 0
 debug: false
 
-early_stopping_ep: 5
+early_stopping_ep: 7
 early_stopping_metric: ndcg@10
 
