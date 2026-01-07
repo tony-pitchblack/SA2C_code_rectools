@@ -1,6 +1,7 @@
 name: sa2c_code_torch
 dependencies:
   - python=3.11
+  - numpy=1.26.4
   - pip
   - requests=2.32.3
   - fastparquet
