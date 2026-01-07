@@ -78,6 +78,7 @@ def parse_args():
     parser.add_argument("--num_heads", default=1, type=int, help="number heads (for SASRec)")
     parser.add_argument("--num_blocks", default=1, type=int, help="number heads (for SASRec)")
     parser.add_argument("--dropout_rate", default=0.1, type=float)
+    parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging and NaN checks.")
 
     return parser.parse_args()
 
@@ -163,7 +164,7 @@ def _sample_negative_actions(item_num, actions, neg, device):
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, reward_click, pop_dict, device):
+def evaluate(model, val_loader, reward_click, pop_dict, device, debug=False):
     total_clicks = 0.0
     total_purchase = 0.0
     topk = [5, 10, 15, 20]
@@ -190,6 +191,8 @@ def evaluate(model, val_loader, reward_click, pop_dict, device):
         state_t = state.to(device, non_blocking=True)
         len_state_t = len_state.to(device, non_blocking=True)
         _, ce_logits = model(state_t, len_state_t)
+        if debug and (not torch.isfinite(ce_logits).all()):
+            raise FloatingPointError("Non-finite ce_logits during evaluation")
         kmax = int(max(topk))
         vals, idx = torch.topk(ce_logits, k=kmax, dim=1, largest=True, sorted=False)
         order = vals.argsort(dim=1)
@@ -322,7 +325,8 @@ def main():
     if args.model != "SASRec":
         raise ValueError("This torch script only supports --model SASRec")
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, format="%(levelname)s: %(message)s")
+    logger = logging.getLogger(__name__)
 
     random.seed(0)
     np.random.seed(0)
@@ -375,6 +379,13 @@ def main():
     total_step = 0
     num_rows = replay_buffer.shape[0]
     num_batches = int(num_rows / train_batch_size)
+    if num_batches <= 0:
+        logger.warning(
+            "num_batches=%d (num_rows=%d, train_batch_size=%d) -> no training batches will run; metrics will be static",
+            int(num_batches),
+            int(num_rows),
+            int(train_batch_size),
+        )
 
     state_all = torch.from_numpy(np.asarray(replay_buffer["state"].tolist(), dtype=np.int64))
     len_state_all = torch.from_numpy(np.asarray(replay_buffer["len_state"].to_numpy(), dtype=np.int64))
@@ -424,6 +435,16 @@ def main():
     behavior_prob_table = behavior_prob_table.to(device)
 
     for epoch_idx in range(args.epoch):
+        if args.debug:
+            logger.debug(
+                "epoch=%d/%d num_rows=%d train_batch_size=%d num_batches=%d total_step=%d",
+                int(epoch_idx + 1),
+                int(args.epoch),
+                int(num_rows),
+                int(train_batch_size),
+                int(num_batches),
+                int(total_step),
+            )
         sampler = RandomSampler(ds, replacement=True, num_samples=num_batches * int(train_batch_size))
         dl = DataLoader(
             ds,
@@ -475,6 +496,11 @@ def main():
                 q_curr_target, _ = target_qn(state_t, len_state_t)
 
             q_values, ce_logits = main_qn(state_t, len_state_t)
+            if args.debug:
+                if not torch.isfinite(q_values).all():
+                    raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
+                if not torch.isfinite(ce_logits).all():
+                    raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
 
             a_star = q_next_selector.argmax(dim=1)
             q_tp1 = q_next_target.gather(1, a_star[:, None]).squeeze(1)
@@ -492,6 +518,8 @@ def main():
 
             if total_step < 15000:
                 loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
+                if args.debug and (not torch.isfinite(loss).all()):
+                    raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
                 opt1.zero_grad(set_to_none=True)
                 loss.backward()
                 opt1.step()
@@ -512,11 +540,13 @@ def main():
 
                 ce_loss_post = ips * ce_loss_pre * advantage
                 loss = float(args.weight) * (qloss_pos + qloss_neg) + ce_loss_post.mean()
+                if args.debug and (not torch.isfinite(loss).all()):
+                    raise FloatingPointError(f"Non-finite loss (phase2) at total_step={int(total_step)}")
                 opt2.zero_grad(set_to_none=True)
                 loss.backward()
                 opt2.step()
                 total_step += 1
-        evaluate(qn1, val_dl, reward_click, pop_dict, device)
+        evaluate(qn1, val_dl, reward_click, pop_dict, device, debug=bool(args.debug))
 
 
 if __name__ == "__main__":
