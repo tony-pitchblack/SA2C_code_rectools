@@ -1,5 +1,6 @@
 seed: 0
-data: Kaggle/data
+dataset: yoochoose
+data: data
 epoch: 50
 
 batch_size_train: 10500

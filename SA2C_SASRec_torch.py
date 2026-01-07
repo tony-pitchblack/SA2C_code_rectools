@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
-from SASRecModules_torch import SASRecQNetworkTorch
+from Kaggle.SASRecModules_torch import SASRecQNetworkTorch
 import yaml
 
 try:
@@ -35,6 +35,7 @@ def _default_config():
     return {
         "seed": 0,
         "epoch": 50,
+        "dataset": "retailrocket",
         "data": "data",
         "batch_size_train": 256,
         "batch_size_val": 256,
@@ -84,12 +85,20 @@ def _apply_cli_overrides(cfg: dict, args):
     return cfg
 
 
-def _make_run_dir(config_path: str):
-    config_name = Path(config_path).stem
-    kaggle_dir = Path(__file__).resolve().parent
-    run_dir = kaggle_dir / "logs" / "SA2C_SASRec_torch" / config_name
+def _make_run_dir(dataset_name: str, config_name: str):
+    repo_root = Path(__file__).resolve().parent
+    run_dir = repo_root / "logs" / "SA2C_SASRec_torch" / dataset_name / config_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    return config_name, run_dir
+    return run_dir
+
+
+def _resolve_dataset_root(dataset: str):
+    repo_root = Path(__file__).resolve().parent
+    if dataset == "yoochoose":
+        return repo_root / "RC15"
+    if dataset == "retailrocket":
+        return repo_root / "Kaggle"
+    raise ValueError("dataset must be one of: yoochoose | retailrocket")
 
 
 def _configure_logging(run_dir: Path, debug: bool):
@@ -388,12 +397,16 @@ def main():
     cfg = _apply_cli_overrides(cfg, args)
     if str(cfg.get("early_stopping_metric", "ndcg@10")) != "ndcg@10":
         raise ValueError("Only early_stopping_metric='ndcg@10' is supported.")
-    config_name, run_dir = _make_run_dir(config_path)
+    dataset_name = str(cfg.get("dataset", "retailrocket"))
+    dataset_root = _resolve_dataset_root(dataset_name)
+    config_name = Path(config_path).stem
+    run_dir = _make_run_dir(dataset_name, config_name)
     _configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
     _dump_config(cfg, run_dir)
 
     logger = logging.getLogger(__name__)
     logger.info("run_dir: %s", str(run_dir))
+    logger.info("dataset: %s", dataset_name)
 
     seed = int(cfg.get("seed", 0))
     random.seed(seed)
@@ -408,7 +421,8 @@ def main():
     else:
         device = torch.device("cpu")
 
-    data_directory = str(cfg.get("data", "data"))
+    data_rel = str(cfg.get("data", "data"))
+    data_directory = str(dataset_root / data_rel)
     data_statis = pd.read_pickle(os.path.join(data_directory, "data_statis.df"))
     state_size = int(data_statis["state_size"][0])
     item_num = int(data_statis["item_num"][0])

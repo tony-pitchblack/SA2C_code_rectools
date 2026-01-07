@@ -6,7 +6,8 @@ rsync -a "${SA2C_code_unzip_dir}/RC15/data/" "RC15/data/"
 ## Run Torch (uv + local .venv) — SASRec only
 conda activate sa2c_code_torch
 
-python Kaggle/SA2C_SASRec_torch.py --config Kaggle/conf/SA2C_SASRec_torch/default.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default.yml
 
 ## Install conda envs (torch / tf)
 conda env create -f dependencies/environment_torch.yml
