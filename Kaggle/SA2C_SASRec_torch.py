@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--data", nargs="?", default="data", help="data directory")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size.")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
+    parser.add_argument("--device_id", type=int, default=0, help="CUDA device id (if CUDA is available).")
     parser.add_argument(
         "--hidden_factor",
         type=int,
@@ -279,7 +280,10 @@ def main():
     np.random.seed(0)
     torch.manual_seed(0)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{int(args.device_id)}")
+    else:
+        device = torch.device("cpu")
 
     data_directory = args.data
     data_statis = pd.read_pickle(os.path.join(data_directory, "data_statis.df"))
