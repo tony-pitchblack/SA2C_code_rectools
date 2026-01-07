@@ -152,35 +152,6 @@ def calculate_hit(
             ndcg_purchase[i] += float((1.0 / np.log2(rank[is_purchase] + 1)).sum())
 
 
-def calculate_off(
-    sorted_list,
-    true_items,
-    rewards,
-    reward_click,
-    off_click_ng,
-    off_purchase_ng,
-    off_prob_click,
-    off_prob_purchase,
-    pop_dict,
-    topk=10,
-):
-    true_items = np.asarray(true_items)
-    rewards = np.asarray(rewards)
-    rec_list = sorted_list[:, -topk:]
-    for j in range(len(true_items)):
-        prob = float(pop_dict[true_items[j]])
-        if rewards[j] == reward_click:
-            off_prob_click[0] += 1.0 / prob
-        else:
-            off_prob_purchase[0] += 1.0 / prob
-        if true_items[j] in rec_list[j]:
-            rank = topk - int(np.argwhere(rec_list[j] == true_items[j])[0][0])
-            if rewards[j] == reward_click:
-                off_click_ng[0] += (1.0 / np.log2(rank + 1)) / prob
-            else:
-                off_purchase_ng[0] += (1.0 / np.log2(rank + 1)) / prob
-
-
 def _sample_negative_actions(item_num, actions, neg, device):
     bsz = actions.shape[0]
     neg_actions = torch.randint(0, item_num, size=(bsz, neg), device=device)
@@ -192,7 +163,7 @@ def _sample_negative_actions(item_num, actions, neg, device):
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, reward_click, pop_dict, device, debug=False):
+def evaluate(model, val_loader, reward_click, device, debug=False):
     total_clicks = 0.0
     total_purchase = 0.0
     topk = [5, 10, 15, 20]
@@ -202,11 +173,6 @@ def evaluate(model, val_loader, reward_click, pop_dict, device, debug=False):
     ndcg_clicks = [0.0, 0.0, 0.0, 0.0]
     hit_purchase = [0.0, 0.0, 0.0, 0.0]
     ndcg_purchase = [0.0, 0.0, 0.0, 0.0]
-
-    off_prob_click = [0.0]
-    off_prob_purchase = [0.0]
-    off_click_ng = [0.0]
-    off_purchase_ng = [0.0]
 
     model.eval()
     for state, len_state, action, reward in tqdm(
@@ -243,20 +209,6 @@ def evaluate(model, val_loader, reward_click, pop_dict, device, debug=False):
             hit_purchase,
             ndcg_purchase,
         )
-        calculate_off(
-            sorted_list,
-            actions,
-            rewards,
-            reward_click,
-            off_click_ng,
-            off_purchase_ng,
-            off_prob_click,
-            off_prob_purchase,
-            pop_dict,
-        )
-
-    off_click_ng_val = off_click_ng[0] / off_prob_click[0] if off_prob_click[0] > 0 else 0.0
-    off_purchase_ng_val = off_purchase_ng[0] / off_prob_purchase[0] if off_prob_purchase[0] > 0 else 0.0
 
     click = {}
     purchase = {}
@@ -280,11 +232,6 @@ def evaluate(model, val_loader, reward_click, pop_dict, device, debug=False):
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         logger.info("clicks hr ndcg @ %d: %f, %f", k, float(click[f"hr@{k}"]), float(click[f"ndcg@{k}"]))
         logger.info("purchase hr ndcg @ %d: %f, %f", k, float(purchase[f"hr@{k}"]), float(purchase[f"ndcg@{k}"]))
-    logger.info(
-        "off-line corrected evaluation (click_ng,purchase_ng)@10: %f, %f",
-        float(off_click_ng_val),
-        float(off_purchase_ng_val),
-    )
     logger.info("#############################################################")
     logger.info("")
 
@@ -293,7 +240,6 @@ def evaluate(model, val_loader, reward_click, pop_dict, device, debug=False):
         "click": click,
         "purchase": purchase,
         "overall": overall,
-        "off": {"click_ng@10": float(off_click_ng_val), "purchase_ng@10": float(off_purchase_ng_val)},
     }
 
 
@@ -411,6 +357,28 @@ def _metrics_row(metrics: dict, kind: str):
         row[f"hr@{k}"] = float(src.get(f"hr@{k}", 0.0))
         row[f"ndcg@{k}"] = float(src.get(f"ndcg@{k}", 0.0))
     return row
+
+
+def _overall_row(metrics: dict):
+    topk = metrics["topk"]
+    src = metrics["overall"]
+    row = {}
+    for k in topk:
+        row[f"ndcg@{k}"] = float(src.get(f"ndcg@{k}", 0.0))
+    return row
+
+
+def _summary_at_k_text(val_metrics: dict, test_metrics: dict, k: int):
+    def g(m: dict, section: str, key: str):
+        return float(m.get(section, {}).get(key, 0.0))
+
+    lines = [
+        f"overall val/ndcg@{k}={g(val_metrics, 'overall', f'ndcg@{k}'):.6f} test/ndcg@{k}={g(test_metrics, 'overall', f'ndcg@{k}'):.6f}",
+        f"click   val/hr@{k}={g(val_metrics, 'click', f'hr@{k}'):.6f} val/ndcg@{k}={g(val_metrics, 'click', f'ndcg@{k}'):.6f}  test/hr@{k}={g(test_metrics, 'click', f'hr@{k}'):.6f} test/ndcg@{k}={g(test_metrics, 'click', f'ndcg@{k}'):.6f}",
+        f"purchase val/hr@{k}={g(val_metrics, 'purchase', f'hr@{k}'):.6f} val/ndcg@{k}={g(val_metrics, 'purchase', f'ndcg@{k}'):.6f}  test/hr@{k}={g(test_metrics, 'purchase', f'hr@{k}'):.6f} test/ndcg@{k}={g(test_metrics, 'purchase', f'ndcg@{k}'):.6f}",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def main():
@@ -677,7 +645,7 @@ def main():
                 loss.backward()
                 opt2.step()
                 total_step += 1
-        val_metrics = evaluate(qn1, val_dl, reward_click, pop_dict, device, debug=bool(cfg.get("debug", False)))
+        val_metrics = evaluate(qn1, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)))
         metric = float(val_metrics["overall"].get("ndcg@10", 0.0))
         if metric > best_metric:
             best_metric = metric
@@ -714,13 +682,15 @@ def main():
     ).to(device)
     best_model.load_state_dict(torch.load(best_path, map_location=device))
 
-    val_best = evaluate(best_model, val_dl, reward_click, pop_dict, device, debug=bool(cfg.get("debug", False)))
-    test_best = evaluate(best_model, test_dl, reward_click, pop_dict, device, debug=bool(cfg.get("debug", False)))
+    val_best = evaluate(best_model, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)))
+    test_best = evaluate(best_model, test_dl, reward_click, device, debug=bool(cfg.get("debug", False)))
 
     val_click = _metrics_row(val_best, "click")
     test_click = _metrics_row(test_best, "click")
     val_purchase = _metrics_row(val_best, "purchase")
     test_purchase = _metrics_row(test_best, "purchase")
+    val_overall = _overall_row(val_best)
+    test_overall = _overall_row(test_best)
 
     col_order = []
     for k in val_best["topk"]:
@@ -743,6 +713,19 @@ def main():
     df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
     df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
     df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
+
+    overall_col_order = []
+    for k in val_best["topk"]:
+        overall_col_order.extend([f"val/ndcg@{k}", f"test/ndcg@{k}"])
+    overall_row = {}
+    for k in val_best["topk"]:
+        overall_row[f"val/ndcg@{k}"] = float(val_overall.get(f"ndcg@{k}", 0.0))
+        overall_row[f"test/ndcg@{k}"] = float(test_overall.get(f"ndcg@{k}", 0.0))
+    df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
+    df_overall.to_csv(run_dir / "results.csv", index=False)
+
+    with open(run_dir / "summary@10.txt", "w") as f:
+        f.write(_summary_at_k_text(val_best, test_best, k=10))
 
 
 if __name__ == "__main__":
