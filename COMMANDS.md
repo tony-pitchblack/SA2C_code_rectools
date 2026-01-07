@@ -6,10 +6,11 @@ rsync -a "${SA2C_code_unzip_dir}/RC15/data/" "RC15/data/"
 ## Run Torch (uv + local .venv) — SASRec only
 conda activate sa2c_code_torch
 
+# --batch_size is: TRAIN_BS VAL_BS (train/val)
 python Kaggle/SA2C_SASRec_torch.py \
   --model SASRec \
   --data Kaggle/data \
-  --batch_size 10500 256 \ # train/val
+  --batch_size 10500 256 \
   --num_workers 4 0 \
   --device_id 2
 
