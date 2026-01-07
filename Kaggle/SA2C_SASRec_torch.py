@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import random
 
@@ -22,7 +23,19 @@ def parse_args():
 
     parser.add_argument("--epoch", type=int, default=50, help="Number of max epochs.")
     parser.add_argument("--data", nargs="?", default="data", help="data directory")
-    parser.add_argument("--batch_size", type=int, default=256, help="Batch size.")
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=256,
+        help="(deprecated) Training batch size; use --train_batch_size instead.",
+    )
+    parser.add_argument(
+        "--train_batch_size",
+        type=int,
+        default=None,
+        help="Training batch size (overrides --batch_size if provided).",
+    )
+    parser.add_argument("--val_batch_size", type=int, default=256, help="Validation batch size.")
     parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
     parser.add_argument("--device_id", type=int, default=0, help="CUDA device id (if CUDA is available).")
     parser.add_argument(
@@ -148,13 +161,7 @@ def _sample_negative_actions(item_num, actions, neg, device):
 
 
 @torch.no_grad()
-def evaluate(model, data_directory, state_size, item_num, reward_click, reward_buy, pop_dict, device):
-    eval_sessions = pd.read_pickle(os.path.join(data_directory, "sampled_val.df"))
-    eval_ids = eval_sessions.session_id.unique()
-    groups = eval_sessions.groupby("session_id")
-
-    batch_sessions = 100
-    evaluated = 0
+def evaluate(model, val_loader, reward_click, pop_dict, device):
     total_clicks = 0.0
     total_purchase = 0.0
     topk = [5, 10, 15, 20]
@@ -171,38 +178,26 @@ def evaluate(model, data_directory, state_size, item_num, reward_click, reward_b
     off_purchase_ng = [0.0]
 
     model.eval()
-    while evaluated < len(eval_ids):
-        states, len_states, actions, rewards = [], [], [], []
-        for _ in range(batch_sessions):
-            if evaluated == len(eval_ids):
-                break
-            sid = eval_ids[evaluated]
-            group = groups.get_group(sid)
-            history = []
-            for _, row in group.iterrows():
-                state = list(history)
-                len_states.append(state_size if len(state) >= state_size else 1 if len(state) == 0 else len(state))
-                states.append(pad_history(state, state_size, item_num))
-                action = int(row["item_id"])
-                is_buy = int(row["is_buy"])
-                reward = reward_buy if is_buy == 1 else reward_click
-                if is_buy == 1:
-                    total_purchase += 1.0
-                else:
-                    total_clicks += 1.0
-                actions.append(action)
-                rewards.append(reward)
-                history.append(action)
-            evaluated += 1
-
-        inputs = torch.as_tensor(np.asarray(states, dtype=np.int64), device=device)
-        lens = torch.as_tensor(np.asarray(len_states, dtype=np.int64), device=device)
-        _, ce_logits = model(inputs, lens)
+    for state, len_state, action, reward in tqdm(
+        val_loader,
+        desc="val",
+        unit="batch",
+        dynamic_ncols=True,
+        leave=False,
+    ):
+        state_t = state.to(device, non_blocking=True)
+        len_state_t = len_state.to(device, non_blocking=True)
+        _, ce_logits = model(state_t, len_state_t)
         kmax = int(max(topk))
         vals, idx = torch.topk(ce_logits, k=kmax, dim=1, largest=True, sorted=False)
         order = vals.argsort(dim=1)
         idx_sorted = idx.gather(1, order)
         sorted_list = idx_sorted.detach().cpu().numpy()
+
+        actions = action.detach().cpu().numpy()
+        rewards = reward.detach().cpu().numpy()
+        total_clicks += float((rewards == reward_click).sum())
+        total_purchase += float((rewards != reward_click).sum())
         calculate_hit(
             sorted_list,
             topk,
@@ -230,19 +225,25 @@ def evaluate(model, data_directory, state_size, item_num, reward_click, reward_b
     off_click_ng_val = off_click_ng[0] / off_prob_click[0] if off_prob_click[0] > 0 else 0.0
     off_purchase_ng_val = off_purchase_ng[0] / off_prob_purchase[0] if off_prob_purchase[0] > 0 else 0.0
 
-    print("#############################################################")
-    print(f"total clicks: {int(total_clicks)}, total purchase:{int(total_purchase)}")
+    logger = logging.getLogger(__name__)
+    logger.info("#############################################################")
+    logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for i, k in enumerate(topk):
         hr_click = hit_clicks[i] / total_clicks if total_clicks > 0 else 0.0
         hr_purchase = hit_purchase[i] / total_purchase if total_purchase > 0 else 0.0
         ng_click = ndcg_clicks[i] / total_clicks if total_clicks > 0 else 0.0
         ng_purchase = ndcg_purchase[i] / total_purchase if total_purchase > 0 else 0.0
-        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
-        print(f"cumulative reward @ {k}: {total_reward[i]:f}")
-        print(f"clicks hr ndcg @ {k} : {hr_click:f}, {ng_click:f}")
-        print(f"purchase hr and ndcg @{k} : {hr_purchase:f}, {ng_purchase:f}")
-    print(f"off-line corrected evaluation (click_ng,purchase_ng)@10: {off_click_ng_val:f}, {off_purchase_ng_val:f}")
-    print("#############################################################")
+        logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        logger.info("cumulative reward @ %d: %f", k, float(total_reward[i]))
+        logger.info("clicks hr ndcg @ %d: %f, %f", k, float(hr_click), float(ng_click))
+        logger.info("purchase hr ndcg @ %d: %f, %f", k, float(hr_purchase), float(ng_purchase))
+    logger.info(
+        "off-line corrected evaluation (click_ng,purchase_ng)@10: %f, %f",
+        float(off_click_ng_val),
+        float(off_purchase_ng_val),
+    )
+    logger.info("#############################################################")
+    logger.info("")
 
 
 class _ReplayBufferDataset(Dataset):
@@ -271,10 +272,55 @@ class _ReplayBufferDataset(Dataset):
         )
 
 
+class _ValDataset(Dataset):
+    def __init__(self, state, len_state, action, reward):
+        super().__init__()
+        self.state = state
+        self.len_state = len_state
+        self.action = action
+        self.reward = reward
+
+    def __len__(self):
+        return int(self.action.shape[0])
+
+    def __getitem__(self, idx):
+        return self.state[idx], self.len_state[idx], self.action[idx], self.reward[idx]
+
+
+def _build_val_tensors(data_directory, state_size, item_num, reward_click, reward_buy):
+    eval_sessions = pd.read_pickle(os.path.join(data_directory, "sampled_val.df"))
+    groups = eval_sessions.groupby("session_id", sort=False)
+
+    states = []
+    len_states = []
+    actions = []
+    rewards = []
+    for _, group in groups:
+        history = []
+        for _, row in group.iterrows():
+            state = list(history)
+            len_states.append(state_size if len(state) >= state_size else 1 if len(state) == 0 else len(state))
+            states.append(pad_history(state, state_size, item_num))
+            action = int(row["item_id"])
+            is_buy = int(row["is_buy"])
+            reward = reward_buy if is_buy == 1 else reward_click
+            actions.append(action)
+            rewards.append(float(reward))
+            history.append(action)
+
+    state_t = torch.from_numpy(np.asarray(states, dtype=np.int64))
+    len_state_t = torch.from_numpy(np.asarray(len_states, dtype=np.int64))
+    action_t = torch.from_numpy(np.asarray(actions, dtype=np.int64))
+    reward_t = torch.from_numpy(np.asarray(rewards, dtype=np.float32))
+    return state_t, len_state_t, action_t, reward_t
+
+
 def main():
     args = parse_args()
     if args.model != "SASRec":
         raise ValueError("This torch script only supports --model SASRec")
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     random.seed(0)
     np.random.seed(0)
@@ -292,6 +338,9 @@ def main():
     reward_click = float(args.r_click)
     reward_buy = float(args.r_buy)
     reward_negative = float(args.r_negative)
+
+    train_batch_size = int(args.train_batch_size) if args.train_batch_size is not None else int(args.batch_size)
+    val_batch_size = int(args.val_batch_size)
 
     replay_buffer = pd.read_pickle(os.path.join(data_directory, "replay_buffer.df"))
     with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
@@ -321,7 +370,7 @@ def main():
 
     total_step = 0
     num_rows = replay_buffer.shape[0]
-    num_batches = int(num_rows / args.batch_size)
+    num_batches = int(num_rows / train_batch_size)
 
     state_all = torch.from_numpy(np.asarray(replay_buffer["state"].tolist(), dtype=np.int64))
     len_state_all = torch.from_numpy(np.asarray(replay_buffer["len_state"].to_numpy(), dtype=np.int64))
@@ -344,6 +393,24 @@ def main():
     pin_memory = device.type == "cuda"
     persistent_workers = args.num_workers > 0
 
+    val_state, val_len_state, val_action, val_reward = _build_val_tensors(
+        data_directory=data_directory,
+        state_size=state_size,
+        item_num=item_num,
+        reward_click=reward_click,
+        reward_buy=reward_buy,
+    )
+    val_ds = _ValDataset(val_state, val_len_state, val_action, val_reward)
+    val_dl = DataLoader(
+        val_ds,
+        batch_size=val_batch_size,
+        shuffle=False,
+        num_workers=int(args.num_workers),
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        drop_last=False,
+    )
+
     behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
     for k, v in pop_dict.items():
         kk = int(k)
@@ -351,11 +418,11 @@ def main():
             behavior_prob_table[kk] = float(v)
     behavior_prob_table = behavior_prob_table.to(device)
 
-    for _ in range(args.epoch):
-        sampler = RandomSampler(ds, replacement=True, num_samples=num_batches * int(args.batch_size))
+    for epoch_idx in range(args.epoch):
+        sampler = RandomSampler(ds, replacement=True, num_samples=num_batches * int(train_batch_size))
         dl = DataLoader(
             ds,
-            batch_size=int(args.batch_size),
+            batch_size=int(train_batch_size),
             sampler=sampler,
             num_workers=int(args.num_workers),
             pin_memory=pin_memory,
@@ -365,7 +432,7 @@ def main():
         for batch in tqdm(
             dl,
             total=num_batches,
-            desc=f"epoch {_ + 1}/{args.epoch}",
+            desc=f"train epoch {epoch_idx + 1}/{args.epoch}",
             unit="batch",
             dynamic_ncols=True,
         ):
@@ -425,7 +492,7 @@ def main():
                 opt1.step()
                 total_step += 1
                 if total_step % 4000 == 0:
-                    evaluate(main_qn, data_directory, state_size, item_num, reward_click, reward_buy, pop_dict, device)
+                    evaluate(main_qn, val_dl, reward_click, pop_dict, device)
             else:
                 with torch.no_grad():
                     prob = F.softmax(ce_logits, dim=1).gather(1, action_t[:, None]).squeeze(1)
@@ -447,7 +514,7 @@ def main():
                 opt2.step()
                 total_step += 1
                 if total_step % 4000 == 0:
-                    evaluate(main_qn, data_directory, state_size, item_num, reward_click, reward_buy, pop_dict, device)
+                    evaluate(main_qn, val_dl, reward_click, pop_dict, device)
 
 
 if __name__ == "__main__":
