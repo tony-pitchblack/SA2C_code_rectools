@@ -9,6 +9,12 @@ import torch.nn.functional as F
 
 from SASRecModules_torch import SASRecQNetworkTorch
 
+try:
+    from tqdm import tqdm  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    def tqdm(x, **kwargs):
+        return x
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run nive double q learning.")
@@ -284,7 +290,12 @@ def main():
     num_batches = int(num_rows / args.batch_size)
 
     for _ in range(args.epoch):
-        for _ in range(num_batches):
+        for _ in tqdm(
+            range(num_batches),
+            desc=f"epoch {_ + 1}/{args.epoch}",
+            unit="batch",
+            dynamic_ncols=True,
+        ):
             if args.max_steps > 0 and total_step >= args.max_steps:
                 return
             batch = replay_buffer.sample(n=args.batch_size)
