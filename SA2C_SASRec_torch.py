@@ -11,8 +11,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
-from Kaggle.SASRecModules_rectools import SASRecQNetworkRectools
-from Kaggle.SASRecModules_torch import SASRecQNetworkTorch
+from SASRecModules_rectools import SASRecQNetworkRectools
+from SASRecModules_torch import SASRecQNetworkTorch
 import yaml
 
 try:
