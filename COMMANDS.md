@@ -9,8 +9,8 @@ conda activate sa2c_code_torch
 python Kaggle/SA2C_SASRec_torch.py \
   --model SASRec \
   --data Kaggle/data \
-  --train_batch_size 10500 \ # ~29GB GPU
-  --num_workers 4 \
+  --batch_size 10500 256 \ # train/val
+  --num_workers 4 0 \
   --device_id 2
 
 ## Install conda envs (torch / tf)

@@ -26,17 +26,19 @@ def parse_args():
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=256,
-        help="(deprecated) Training batch size; use --train_batch_size instead.",
+        nargs=2,
+        default=[256, 256],
+        metavar=("TRAIN_BS", "VAL_BS"),
+        help="Batch sizes: train and val.",
     )
     parser.add_argument(
-        "--train_batch_size",
+        "--num_workers",
         type=int,
-        default=None,
-        help="Training batch size (overrides --batch_size if provided).",
+        nargs=2,
+        default=[0, 0],
+        metavar=("TRAIN_NW", "VAL_NW"),
+        help="DataLoader workers: train and val.",
     )
-    parser.add_argument("--val_batch_size", type=int, default=256, help="Validation batch size.")
-    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers.")
     parser.add_argument("--device_id", type=int, default=0, help="CUDA device id (if CUDA is available).")
     parser.add_argument(
         "--hidden_factor",
@@ -339,8 +341,10 @@ def main():
     reward_buy = float(args.r_buy)
     reward_negative = float(args.r_negative)
 
-    train_batch_size = int(args.train_batch_size) if args.train_batch_size is not None else int(args.batch_size)
-    val_batch_size = int(args.val_batch_size)
+    train_batch_size = int(args.batch_size[0])
+    val_batch_size = int(args.batch_size[1])
+    train_num_workers = int(args.num_workers[0])
+    val_num_workers = int(args.num_workers[1])
 
     replay_buffer = pd.read_pickle(os.path.join(data_directory, "replay_buffer.df"))
     with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
@@ -391,7 +395,8 @@ def main():
     )
 
     pin_memory = device.type == "cuda"
-    persistent_workers = args.num_workers > 0
+    train_persistent_workers = train_num_workers > 0
+    val_persistent_workers = val_num_workers > 0
 
     val_state, val_len_state, val_action, val_reward = _build_val_tensors(
         data_directory=data_directory,
@@ -405,9 +410,9 @@ def main():
         val_ds,
         batch_size=val_batch_size,
         shuffle=False,
-        num_workers=int(args.num_workers),
+        num_workers=val_num_workers,
         pin_memory=pin_memory,
-        persistent_workers=persistent_workers,
+        persistent_workers=val_persistent_workers,
         drop_last=False,
     )
 
@@ -424,9 +429,9 @@ def main():
             ds,
             batch_size=int(train_batch_size),
             sampler=sampler,
-            num_workers=int(args.num_workers),
+            num_workers=train_num_workers,
             pin_memory=pin_memory,
-            persistent_workers=persistent_workers,
+            persistent_workers=train_persistent_workers,
             drop_last=True,
         )
         for batch in tqdm(
