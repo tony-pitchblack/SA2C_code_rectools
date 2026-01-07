@@ -496,8 +496,6 @@ def main():
                 loss.backward()
                 opt1.step()
                 total_step += 1
-                if total_step % 4000 == 0:
-                    evaluate(main_qn, val_dl, reward_click, pop_dict, device)
             else:
                 with torch.no_grad():
                     prob = F.softmax(ce_logits, dim=1).gather(1, action_t[:, None]).squeeze(1)
@@ -518,8 +516,7 @@ def main():
                 loss.backward()
                 opt2.step()
                 total_step += 1
-                if total_step % 4000 == 0:
-                    evaluate(main_qn, val_dl, reward_click, pop_dict, device)
+        evaluate(qn1, val_dl, reward_click, pop_dict, device)
 
 
 if __name__ == "__main__":
