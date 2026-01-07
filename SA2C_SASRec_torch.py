@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
+from Kaggle.SASRecModules_rectools import SASRecQNetworkRectools
 from Kaggle.SASRecModules_torch import SASRecQNetworkTorch
 import yaml
 
@@ -61,6 +62,7 @@ def _default_config():
         "debug": False,
         "early_stopping_ep": 5,
         "early_stopping_metric": "ndcg@10",
+        "use_rectoools_backbone": False,
     }
 
 
@@ -124,9 +126,25 @@ def _dump_config(cfg: dict, run_dir: Path):
 def pad_history(itemlist, length, pad_item):
     if len(itemlist) >= length:
         return itemlist[-length:]
-    if len(itemlist) < length:
-        return itemlist + [pad_item] * (length - len(itemlist))
-    return itemlist
+    return itemlist + [pad_item] * (length - len(itemlist))
+
+
+def pad_history_left(itemlist, length, pad_item):
+    if len(itemlist) >= length:
+        return itemlist[-length:]
+    return [pad_item] * (length - len(itemlist)) + itemlist
+
+
+def _shift_ids_and_leftpad_rightpadded(x: torch.Tensor, old_pad_id: int) -> torch.Tensor:
+    x = torch.where(x == int(old_pad_id), torch.zeros_like(x), x + 1)
+    n, l = x.shape
+    counts = (x != 0).sum(dim=1).clamp(min=0, max=l)
+    cols = torch.arange(l, device=x.device).unsqueeze(0).expand(n, l)
+    shift = (l - counts).unsqueeze(1)
+    src_index = (cols - shift).clamp(min=0)
+    y = x.gather(1, src_index)
+    y = y.masked_fill(cols < shift, 0)
+    return y
 
 
 def calculate_hit(
@@ -162,18 +180,20 @@ def calculate_hit(
             ndcg_purchase[i] += float((1.0 / np.log2(rank[is_purchase] + 1)).sum())
 
 
-def _sample_negative_actions(item_num, actions, neg, device):
+def _sample_negative_actions(min_id: int, max_id_exclusive: int, actions, neg, device):
     bsz = actions.shape[0]
-    neg_actions = torch.randint(0, item_num, size=(bsz, neg), device=device)
+    neg_actions = torch.randint(int(min_id), int(max_id_exclusive), size=(bsz, neg), device=device)
     bad = neg_actions.eq(actions[:, None])
     while bad.any():
-        neg_actions[bad] = torch.randint(0, item_num, size=(int(bad.sum().item()),), device=device)
+        neg_actions[bad] = torch.randint(
+            int(min_id), int(max_id_exclusive), size=(int(bad.sum().item()),), device=device
+        )
         bad = neg_actions.eq(actions[:, None])
     return neg_actions
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, reward_click, device, debug=False):
+def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_backbone: bool = False):
     total_clicks = 0.0
     total_purchase = 0.0
     topk = [5, 10, 15, 20]
@@ -195,6 +215,9 @@ def evaluate(model, val_loader, reward_click, device, debug=False):
         state_t = state.to(device, non_blocking=True)
         len_state_t = len_state.to(device, non_blocking=True)
         _, ce_logits = model(state_t, len_state_t)
+        if bool(use_rectools_backbone):
+            ce_logits = ce_logits.clone()
+            ce_logits[:, 0] = float("-inf")
         if debug and (not torch.isfinite(ce_logits).all()):
             raise FloatingPointError("Non-finite ce_logits during evaluation")
         kmax = int(max(topk))
@@ -311,7 +334,9 @@ class _ValDataset(Dataset):
         return self.state[idx], self.len_state[idx], self.action[idx], self.reward[idx]
 
 
-def _build_eval_tensors(data_directory, split_df_name, state_size, item_num, reward_click, reward_buy):
+def _build_eval_tensors(
+    data_directory, split_df_name, state_size, item_num, reward_click, reward_buy, use_rectools_backbone: bool = False
+):
     eval_sessions = pd.read_pickle(os.path.join(data_directory, split_df_name))
     groups = eval_sessions.groupby("session_id", sort=False)
 
@@ -324,8 +349,12 @@ def _build_eval_tensors(data_directory, split_df_name, state_size, item_num, rew
         for _, row in group.iterrows():
             state = list(history)
             len_states.append(state_size if len(state) >= state_size else 1 if len(state) == 0 else len(state))
-            states.append(pad_history(state, state_size, item_num))
-            action = int(row["item_id"])
+            if bool(use_rectools_backbone):
+                states.append(pad_history_left(state, state_size, 0))
+                action = int(row["item_id"]) + 1
+            else:
+                states.append(pad_history(state, state_size, item_num))
+                action = int(row["item_id"])
             is_buy = int(row["is_buy"])
             reward = reward_buy if is_buy == 1 else reward_click
             actions.append(action)
@@ -347,6 +376,7 @@ def _build_eval_dataset(
     reward_click,
     reward_buy,
     purchase_only: bool = False,
+    use_rectools_backbone: bool = False,
 ):
     state, len_state, action, reward = _build_eval_tensors(
         data_directory=data_directory,
@@ -355,6 +385,7 @@ def _build_eval_dataset(
         item_num=item_num,
         reward_click=reward_click,
         reward_buy=reward_buy,
+        use_rectools_backbone=bool(use_rectools_backbone),
     )
     return _ValDataset(
         state=state,
@@ -452,6 +483,7 @@ def main():
     data_statis = pd.read_pickle(os.path.join(data_directory, "data_statis.df"))
     state_size = int(data_statis["state_size"][0])
     item_num = int(data_statis["item_num"][0])
+    use_rectools_backbone = bool(cfg.get("use_rectoools_backbone", cfg.get("use_rectools_backbone", False)))
     reward_click = float(cfg.get("r_click", 0.2))
     reward_buy = float(cfg.get("r_buy", 1.0))
     reward_negative = float(cfg.get("r_negative", -0.0))
@@ -466,7 +498,8 @@ def main():
     with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
         pop_dict = eval(f.read())
 
-    qn1 = SASRecQNetworkTorch(
+    qnet_cls = SASRecQNetworkRectools if use_rectools_backbone else SASRecQNetworkTorch
+    qn1 = qnet_cls(
         item_num=item_num,
         state_size=state_size,
         hidden_size=int(cfg.get("hidden_factor", 64)),
@@ -474,7 +507,7 @@ def main():
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
     ).to(device)
-    qn2 = SASRecQNetworkTorch(
+    qn2 = qnet_cls(
         item_num=item_num,
         state_size=state_size,
         hidden_size=int(cfg.get("hidden_factor", 64)),
@@ -508,6 +541,12 @@ def main():
     is_buy_all = torch.from_numpy(np.asarray(replay_buffer["is_buy"].to_numpy(), dtype=np.int64))
     done_all = torch.from_numpy(np.asarray(replay_buffer["is_done"].to_numpy(), dtype=np.bool_))
 
+    if use_rectools_backbone:
+        action_all = action_all + 1
+        old_pad_id = int(item_num)
+        state_all = _shift_ids_and_leftpad_rightpadded(state_all, old_pad_id=old_pad_id)
+        next_state_all = _shift_ids_and_leftpad_rightpadded(next_state_all, old_pad_id=old_pad_id)
+
     ds = _ReplayBufferDataset(
         state=state_all,
         len_state=len_state_all,
@@ -531,6 +570,7 @@ def main():
         reward_click=reward_click,
         reward_buy=reward_buy,
         purchase_only=purchase_only,
+        use_rectools_backbone=use_rectools_backbone,
     )
     val_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -546,6 +586,7 @@ def main():
         reward_click=reward_click,
         reward_buy=reward_buy,
         purchase_only=purchase_only,
+        use_rectools_backbone=use_rectools_backbone,
     )
     test_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -555,8 +596,12 @@ def main():
     behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
     for k, v in pop_dict.items():
         kk = int(k)
-        if 0 <= kk <= item_num:
-            behavior_prob_table[kk] = float(v)
+        if use_rectools_backbone:
+            if 0 <= kk < item_num:
+                behavior_prob_table[kk + 1] = float(v)
+        else:
+            if 0 <= kk <= item_num:
+                behavior_prob_table[kk] = float(v)
     behavior_prob_table = behavior_prob_table.to(device)
 
     early_patience = int(cfg.get("early_stopping_ep", 5))
@@ -631,7 +676,10 @@ def main():
             discount_t = discount.to(device, non_blocking=pin_memory)
             done_t = is_done.to(device, non_blocking=pin_memory).to(torch.float32)
 
-            neg_actions_t = _sample_negative_actions(item_num, action_t, int(cfg.get("neg", 10)), device=device)
+            if use_rectools_backbone:
+                neg_actions_t = _sample_negative_actions(1, item_num + 1, action_t, int(cfg.get("neg", 10)), device=device)
+            else:
+                neg_actions_t = _sample_negative_actions(0, item_num, action_t, int(cfg.get("neg", 10)), device=device)
 
             with torch.no_grad():
                 q_next_target, _ = target_qn(next_state_t, len_next_state_t)
@@ -689,7 +737,9 @@ def main():
                 loss.backward()
                 opt2.step()
                 total_step += 1
-        val_metrics = evaluate(qn1, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)))
+        val_metrics = evaluate(
+            qn1, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)), use_rectools_backbone=use_rectools_backbone
+        )
         metric = float(val_metrics["overall"].get("ndcg@10", 0.0))
         if metric > best_metric:
             best_metric = metric
@@ -716,7 +766,7 @@ def main():
     if not best_path.exists():
         torch.save(qn1.state_dict(), best_path)
 
-    best_model = SASRecQNetworkTorch(
+    best_model = qnet_cls(
         item_num=item_num,
         state_size=state_size,
         hidden_size=int(cfg.get("hidden_factor", 64)),
@@ -726,8 +776,12 @@ def main():
     ).to(device)
     best_model.load_state_dict(torch.load(best_path, map_location=device))
 
-    val_best = evaluate(best_model, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)))
-    test_best = evaluate(best_model, test_dl, reward_click, device, debug=bool(cfg.get("debug", False)))
+    val_best = evaluate(
+        best_model, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)), use_rectools_backbone=use_rectools_backbone
+    )
+    test_best = evaluate(
+        best_model, test_dl, reward_click, device, debug=bool(cfg.get("debug", False)), use_rectools_backbone=use_rectools_backbone
+    )
 
     val_click = _metrics_row(val_best, "click")
     test_click = _metrics_row(test_best, "click")

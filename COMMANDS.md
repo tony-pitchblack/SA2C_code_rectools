@@ -10,6 +10,8 @@ python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default.yml
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only.yml
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only_rectools.yaml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only_rectools.yaml
 
 ## Install conda envs (torch / tf)
 conda env create -f dependencies/environment_torch.yml
