@@ -85,7 +85,8 @@ def _apply_cli_overrides(cfg: dict, args):
 
 def _make_run_dir(config_path: str):
     config_name = Path(config_path).stem
-    run_dir = Path("Kaggle") / "logs" / "SA2C_SASRec_torch" / config_name
+    kaggle_dir = Path(__file__).resolve().parent
+    run_dir = kaggle_dir / "logs" / "SA2C_SASRec_torch" / config_name
     run_dir.mkdir(parents=True, exist_ok=True)
     return config_name, run_dir
 
@@ -364,6 +365,48 @@ def _build_eval_tensors(data_directory, split_df_name, state_size, item_num, rew
     return state_t, len_state_t, action_t, reward_t
 
 
+def _make_eval_loader(
+    data_directory,
+    split_df_name,
+    state_size,
+    item_num,
+    reward_click,
+    reward_buy,
+    batch_size,
+    num_workers,
+    pin_memory,
+):
+    state, len_state, action, reward = _build_eval_tensors(
+        data_directory=data_directory,
+        split_df_name=split_df_name,
+        state_size=state_size,
+        item_num=item_num,
+        reward_click=reward_click,
+        reward_buy=reward_buy,
+    )
+    ds = _ValDataset(state, len_state, action, reward)
+    persistent_workers = num_workers > 0
+    return DataLoader(
+        ds,
+        batch_size=int(batch_size),
+        shuffle=False,
+        num_workers=int(num_workers),
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        drop_last=False,
+    )
+
+
+def _metrics_row(metrics: dict, kind: str):
+    topk = metrics["topk"]
+    src = metrics[kind]
+    row = {}
+    for k in topk:
+        row[f"hr@{k}"] = float(src.get(f"hr@{k}", 0.0))
+        row[f"ndcg@{k}"] = float(src.get(f"ndcg@{k}", 0.0))
+    return row
+
+
 def main():
     args = parse_args()
     config_path = args.config
@@ -461,25 +504,16 @@ def main():
 
     pin_memory = device.type == "cuda"
     train_persistent_workers = train_num_workers > 0
-    val_persistent_workers = val_num_workers > 0
-
-    val_state, val_len_state, val_action, val_reward = _build_eval_tensors(
+    val_dl = _make_eval_loader(
         data_directory=data_directory,
         split_df_name="sampled_val.df",
         state_size=state_size,
         item_num=item_num,
         reward_click=reward_click,
         reward_buy=reward_buy,
-    )
-    val_ds = _ValDataset(val_state, val_len_state, val_action, val_reward)
-    val_dl = DataLoader(
-        val_ds,
         batch_size=val_batch_size,
-        shuffle=False,
         num_workers=val_num_workers,
         pin_memory=pin_memory,
-        persistent_workers=val_persistent_workers,
-        drop_last=False,
     )
 
     behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
@@ -629,6 +663,62 @@ def main():
         if stop_training:
             logger.info("max_steps reached; stopping")
             break
+
+    best_path = run_dir / "best_model.pt"
+    if not best_path.exists():
+        torch.save(qn1.state_dict(), best_path)
+
+    best_model = SASRecQNetworkTorch(
+        item_num=item_num,
+        state_size=state_size,
+        hidden_size=int(cfg.get("hidden_factor", 64)),
+        num_heads=int(cfg.get("num_heads", 1)),
+        num_blocks=int(cfg.get("num_blocks", 1)),
+        dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+    ).to(device)
+    best_model.load_state_dict(torch.load(best_path, map_location=device))
+
+    test_dl = _make_eval_loader(
+        data_directory=data_directory,
+        split_df_name="sampled_test.df",
+        state_size=state_size,
+        item_num=item_num,
+        reward_click=reward_click,
+        reward_buy=reward_buy,
+        batch_size=val_batch_size,
+        num_workers=val_num_workers,
+        pin_memory=pin_memory,
+    )
+
+    val_best = evaluate(best_model, val_dl, reward_click, pop_dict, device, debug=bool(cfg.get("debug", False)))
+    test_best = evaluate(best_model, test_dl, reward_click, pop_dict, device, debug=bool(cfg.get("debug", False)))
+
+    val_click = _metrics_row(val_best, "click")
+    test_click = _metrics_row(test_best, "click")
+    val_purchase = _metrics_row(val_best, "purchase")
+    test_purchase = _metrics_row(test_best, "purchase")
+
+    col_order = []
+    for k in val_best["topk"]:
+        col_order.extend([f"val/hr@{k}", f"test/hr@{k}", f"val/ndcg@{k}", f"test/ndcg@{k}"])
+
+    click_row = {}
+    purchase_row = {}
+    for k in val_best["topk"]:
+        click_row[f"val/hr@{k}"] = float(val_click.get(f"hr@{k}", 0.0))
+        click_row[f"test/hr@{k}"] = float(test_click.get(f"hr@{k}", 0.0))
+        click_row[f"val/ndcg@{k}"] = float(val_click.get(f"ndcg@{k}", 0.0))
+        click_row[f"test/ndcg@{k}"] = float(test_click.get(f"ndcg@{k}", 0.0))
+
+        purchase_row[f"val/hr@{k}"] = float(val_purchase.get(f"hr@{k}", 0.0))
+        purchase_row[f"test/hr@{k}"] = float(test_purchase.get(f"hr@{k}", 0.0))
+        purchase_row[f"val/ndcg@{k}"] = float(val_purchase.get(f"ndcg@{k}", 0.0))
+        purchase_row[f"test/ndcg@{k}"] = float(test_purchase.get(f"ndcg@{k}", 0.0))
+
+    df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
+    df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
+    df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
+    df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
 
 
 if __name__ == "__main__":

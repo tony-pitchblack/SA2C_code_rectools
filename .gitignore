@@ -2,14 +2,15 @@
 # Project / IDE files #
 ######################
 
-*.zip
 .DS_Store
 .cursor/
 .vscode/
 *.code-workspace
-lightning_logs
 
 data/
+logs/
+*.zip
+
 ##########
 # Python #
 ##########
