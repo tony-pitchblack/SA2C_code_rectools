@@ -6,8 +6,8 @@ epoch: 80
 purchase_only: false
 use_rectoools_backbone: true
 
-batch_size_train: 10500 # ~25GB GPU mem
-batch_size_val: 256
+batch_size_train: 128 # ~31GB GPU mem
+batch_size_val: 128
 num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
 num_workers_val: 0
 device_id: 2

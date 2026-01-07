@@ -5,7 +5,7 @@ epoch: 80
 
 batch_size_train: 128 # ~31GB GPU mem
 batch_size_val: 128
-num_workers_train: 0 # RAM consumption not tested, might blow up -> monitor
+num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
 num_workers_val: 0
 device_id: 2
 
