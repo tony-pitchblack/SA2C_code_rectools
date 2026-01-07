@@ -3,6 +3,16 @@ SA2C_code_unzip_dir=/raid/data_share/antonchernov/transformer_benchmark_rl/data/
 rsync -a "${SA2C_code_unzip_dir}/Kaggle/data/" "Kaggle/data/"
 rsync -a "${SA2C_code_unzip_dir}/RC15/data/" "RC15/data/"
 
+## Run Torch (uv + local .venv) — SASRec only
+python Kaggle/SA2C_SASRec_torch.py \
+  --model SASRec \
+  --data Kaggle/data \
+  --batch_size 512 \
+  --max_steps 2 && \
+python Kaggle/SA2C_SASRec_torch.py \
+  --model SASRec \
+  --data Kaggle/data
+
 ## Install conda envs (torch / tf)
 conda env create -f dependencies/environment_torch.yml
 conda env create -f dependencies/environment_tf.yml
