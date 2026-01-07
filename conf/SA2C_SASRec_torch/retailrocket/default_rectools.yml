@@ -1,0 +1,37 @@
+seed: 0
+dataset: retailrocket
+data: data
+epoch: 50
+
+purchase_only: false
+use_rectoools_backbone: true
+
+batch_size_train: 10500 # ~29GB GPU mem
+batch_size_val: 256
+num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
+num_workers_val: 0
+device_id: 2
+
+hidden_factor: 64
+num_heads: 1
+num_blocks: 1
+dropout_rate: 0.1
+
+r_click: 0.2
+r_buy: 1.0
+r_negative: -0.0
+discount: 0.5
+neg: 10
+weight: 1.0
+smooth: 0.0
+clip: 0.0
+
+lr: 0.005
+lr_2: 0.001
+
+max_steps: 0
+debug: false
+
+early_stopping_ep: 5
+early_stopping_metric: ndcg@10
+
