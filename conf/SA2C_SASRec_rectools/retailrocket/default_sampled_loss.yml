@@ -1,11 +1,11 @@
 seed: 0
 dataset: retailrocket
 data: data
-epoch: 80
+epoch: 200
 
 purchase_only: false
 
-batch_size_train: 600 # ~32GB GPU mem
+batch_size_train: 5500 # ~32GB GPU mem
 batch_size_val: 128
 num_workers_train: 4
 num_workers_val: 0
@@ -35,7 +35,7 @@ sampled_loss:
 max_steps: 0
 debug: false
 
-early_stopping_ep: 10
+early_stopping_ep: 25
 early_stopping_metric: ndcg@10
 
 

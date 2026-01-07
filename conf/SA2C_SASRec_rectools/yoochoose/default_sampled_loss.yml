@@ -1,15 +1,15 @@
 seed: 0
 dataset: yoochoose
 data: data
-epoch: 80
+epoch: 200
 
 purchase_only: false
 
-batch_size_train: 1280 # ~31GB GPU mem
+batch_size_train: 4000 # ~31GB GPU mem
 batch_size_val: 128
-num_workers_train: 4
+num_workers_train: 6
 num_workers_val: 0
-device_id: 5
+device_id: 7
 
 hidden_factor: 64
 num_heads: 1
@@ -35,7 +35,7 @@ sampled_loss:
 max_steps: 0
 debug: false
 
-early_stopping_ep: 7
+early_stopping_ep: 25
 early_stopping_metric: ndcg@10
 
 
