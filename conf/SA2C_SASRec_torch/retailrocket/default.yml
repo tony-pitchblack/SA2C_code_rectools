@@ -29,6 +29,6 @@ lr_2: 0.001
 max_steps: 0
 debug: false
 
-early_stopping_ep: 7
+early_stopping_ep: 10
 early_stopping_metric: ndcg@10
 
