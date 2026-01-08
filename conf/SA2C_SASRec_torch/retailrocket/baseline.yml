@@ -1,17 +1,15 @@
 seed: 0
-dataset: yoochoose
+dataset: retailrocket
 data: data
-epoch: 50
+epoch: 80
 
-purchase_only: true
-use_rectoools_backbone: true
-reward_fn: ndcg
+enable_sa2c: false
 
-batch_size_train: 24000  # ~31GB GPU mem
-batch_size_val: 256
-num_workers_train: 4
+batch_size_train: 128 # ~31GB GPU mem
+batch_size_val: 128
+num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
 num_workers_val: 0
-device_id: 6
+device_id: 2
 
 hidden_factor: 64
 num_heads: 1
@@ -33,7 +31,7 @@ lr_2: 0.001
 max_steps: 0
 debug: false
 
-early_stopping_ep: 5
+early_stopping_ep: 10
 early_stopping_metric: ndcg@10
 
 

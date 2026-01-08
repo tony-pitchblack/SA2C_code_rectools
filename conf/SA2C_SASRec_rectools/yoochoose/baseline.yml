@@ -2,14 +2,15 @@ seed: 0
 dataset: yoochoose
 data: data
 epoch: 80
+enable_sa2c: false
 
-purchase_only: true
+purchase_only: false
 
-batch_size_train: 27000 # ~29GB GPU mem
-batch_size_val: 256
-num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
+batch_size_train: 1280
+batch_size_val: 128
+num_workers_train: 4
 num_workers_val: 0
-device_id: 6
+device_id: 5
 
 hidden_factor: 64
 num_heads: 1
@@ -27,6 +28,9 @@ clip: 0.0
 
 lr: 0.005
 lr_2: 0.001
+
+sampled_loss:
+  use: false
 
 max_steps: 0
 debug: false

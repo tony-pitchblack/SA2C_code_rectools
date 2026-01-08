@@ -1,16 +1,16 @@
 seed: 0
-dataset: retailrocket
+dataset: yoochoose
 data: data
-epoch: 50
+epoch: 80
+warmup_epochs: 7
 
 purchase_only: true
-use_rectoools_backbone: true
 
-batch_size_train: 10500  # ~25GB GPU mem
+batch_size_train: 256
 batch_size_val: 256
 num_workers_train: 4
 num_workers_val: 0
-device_id: 3
+device_id: 6
 
 hidden_factor: 64
 num_heads: 1
@@ -32,7 +32,7 @@ lr_2: 0.001
 max_steps: 0
 debug: false
 
-early_stopping_ep: 5
+early_stopping_ep: 7
 early_stopping_metric: ndcg@10
 
 

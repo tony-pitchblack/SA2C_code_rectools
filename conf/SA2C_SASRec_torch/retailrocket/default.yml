@@ -1,10 +1,10 @@
 seed: 0
 dataset: retailrocket
 data: data
-epoch: 50
+epoch: 80
 
-batch_size_train: 10500 # ~29GB GPU mem
-batch_size_val: 256
+batch_size_train: 128 # ~31GB GPU mem
+batch_size_val: 128
 num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
 num_workers_val: 0
 device_id: 2
@@ -29,6 +29,6 @@ lr_2: 0.001
 max_steps: 0
 debug: false
 
-early_stopping_ep: 5
+early_stopping_ep: 10
 early_stopping_metric: ndcg@10
 

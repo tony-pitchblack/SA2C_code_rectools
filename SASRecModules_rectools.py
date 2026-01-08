@@ -116,7 +116,19 @@ class SASRecQNetworkRectools(nn.Module):
         causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
         self.register_buffer("causal_attn_mask", causal, persistent=False)
 
-    def forward(self, inputs: torch.Tensor, len_state: torch.Tensor):
+    def forward(self, inputs: torch.Tensor, len_state: Optional[torch.Tensor] = None):
+        bsz, seqlen = inputs.shape
+        if seqlen != self.state_size:
+            raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
+
+        seqs = self.encode_seq(inputs)
+        ce_logits_seq = seqs @ self.item_emb.weight.t()
+        q_values_seq = self.head_q(seqs)
+        q_values_seq[:, :, self.pad_id] = float("-inf")
+        ce_logits_seq[:, :, self.pad_id] = float("-inf")
+        return q_values_seq, ce_logits_seq
+
+    def encode_seq(self, inputs: torch.Tensor) -> torch.Tensor:
         bsz, seqlen = inputs.shape
         if seqlen != self.state_size:
             raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
@@ -135,16 +147,88 @@ class SASRecQNetworkRectools(nn.Module):
             key_padding_mask = inputs == self.pad_id
 
         seqs = self.layers(seqs, timeline_mask, attn_mask, key_padding_mask)
+        return seqs
 
-        has_any = (inputs != self.pad_id).any(dim=1)
-        last_pos = torch.full((bsz,), self.state_size - 1, device=inputs.device, dtype=torch.long)
-        idx = torch.where(has_any, last_pos, torch.zeros_like(last_pos))
-        pooled = seqs[torch.arange(bsz, device=inputs.device), idx]
+    def score_ce_candidates(self, seqs_flat: torch.Tensor, cand_ids: torch.Tensor) -> torch.Tensor:
+        emb = self.item_emb(cand_ids)
+        logits = (seqs_flat[:, None, :] * emb).sum(dim=-1)
+        logits = logits.masked_fill(cand_ids.eq(self.pad_id), float("-inf"))
+        return logits
 
-        ce_logits = pooled @ self.item_emb.weight.t()
-        q_values = self.head_q(pooled)
-        q_values[:, self.pad_id] = float("-inf")
-        ce_logits[:, self.pad_id] = float("-inf")
-        return q_values, ce_logits
+    def score_q_candidates(self, seqs_flat: torch.Tensor, cand_ids: torch.Tensor) -> torch.Tensor:
+        w = self.head_q.weight[cand_ids]
+        b = self.head_q.bias[cand_ids]
+        logits = (seqs_flat[:, None, :] * w).sum(dim=-1) + b
+        logits = logits.masked_fill(cand_ids.eq(self.pad_id), float("-inf"))
+        return logits
 
+
+class SASRecBaselineRectools(nn.Module):
+    def __init__(
+        self,
+        item_num: int,
+        state_size: int,
+        hidden_size: int,
+        num_heads: int,
+        num_blocks: int,
+        dropout_rate: float,
+        use_causal_attn: bool = True,
+        use_key_padding_mask: bool = False,
+    ):
+        super().__init__()
+        self.item_num = int(item_num)
+        self.state_size = int(state_size)
+        self.hidden_size = int(hidden_size)
+        self.pad_id = 0
+
+        self.item_emb = nn.Embedding(self.item_num + 1, self.hidden_size, padding_idx=self.pad_id)
+        self.pos_encoding = LearnableInversePositionalEncoding(self.state_size, self.hidden_size)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.layers = SASRecTransformerLayers(
+            n_blocks=int(num_blocks),
+            n_factors=self.hidden_size,
+            n_heads=int(num_heads),
+            dropout_rate=float(dropout_rate),
+        )
+
+        self.use_causal_attn = bool(use_causal_attn)
+        self.use_key_padding_mask = bool(use_key_padding_mask)
+        causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
+        self.register_buffer("causal_attn_mask", causal, persistent=False)
+
+    def forward(self, inputs: torch.Tensor, len_state: Optional[torch.Tensor] = None) -> torch.Tensor:
+        bsz, seqlen = inputs.shape
+        if seqlen != self.state_size:
+            raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
+        seqs = self.encode_seq(inputs)
+        ce_logits_seq = seqs @ self.item_emb.weight.t()
+        ce_logits_seq[:, :, self.pad_id] = float("-inf")
+        return ce_logits_seq
+
+    def encode_seq(self, inputs: torch.Tensor) -> torch.Tensor:
+        bsz, seqlen = inputs.shape
+        if seqlen != self.state_size:
+            raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
+
+        timeline_mask = (inputs != self.pad_id).unsqueeze(-1).to(self.item_emb.weight.dtype)
+
+        seqs = self.item_emb(inputs)
+        seqs = self.pos_encoding(seqs)
+        seqs = self.dropout(seqs)
+
+        attn_mask = None
+        key_padding_mask = None
+        if self.use_causal_attn:
+            attn_mask = self.causal_attn_mask[:seqlen, :seqlen]
+        if self.use_key_padding_mask:
+            key_padding_mask = inputs == self.pad_id
+
+        seqs = self.layers(seqs, timeline_mask, attn_mask, key_padding_mask)
+        return seqs
+
+    def score_ce_candidates(self, seqs_flat: torch.Tensor, cand_ids: torch.Tensor) -> torch.Tensor:
+        emb = self.item_emb(cand_ids)
+        logits = (seqs_flat[:, None, :] * emb).sum(dim=-1)
+        logits = logits.masked_fill(cand_ids.eq(self.pad_id), float("-inf"))
+        return logits
 

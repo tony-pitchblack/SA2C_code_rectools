@@ -86,3 +86,52 @@ class SASRecQNetworkTorch(nn.Module):
         return q_values, ce_logits
 
 
+class SASRecBaselineTorch(nn.Module):
+    def __init__(self, item_num, state_size, hidden_size, num_heads, num_blocks, dropout_rate):
+        super().__init__()
+        self.item_num = int(item_num)
+        self.state_size = int(state_size)
+        self.hidden_size = int(hidden_size)
+        self.pad_id = self.item_num
+
+        self.item_emb = nn.Embedding(self.item_num + 1, self.hidden_size, padding_idx=self.pad_id)
+        self.pos_emb = nn.Embedding(self.state_size, self.hidden_size)
+        self.dropout = nn.Dropout(dropout_rate)
+
+        self.blocks = nn.ModuleList(
+            [SASRecBlock(self.hidden_size, num_heads=num_heads, dropout=dropout_rate) for _ in range(num_blocks)]
+        )
+        self.final_ln = nn.LayerNorm(self.hidden_size)
+        self.head_ce = nn.Linear(self.hidden_size, self.item_num)
+
+        causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
+        self.register_buffer("causal_attn_mask", causal, persistent=False)
+
+    def forward(self, inputs, len_state):
+        bsz, seqlen = inputs.shape
+        if seqlen != self.state_size:
+            raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
+
+        positions = torch.arange(self.state_size, device=inputs.device)
+        x = self.item_emb(inputs) + self.pos_emb(positions)[None, :, :]
+        x = self.dropout(x)
+        seq_mask = (inputs != self.pad_id).unsqueeze(-1).to(x.dtype)
+        x = x * seq_mask
+
+        key_padding_mask = inputs == self.pad_id
+        if key_padding_mask.any():
+            all_pad = key_padding_mask.all(dim=1)
+            if all_pad.any():
+                key_padding_mask = key_padding_mask.clone()
+                key_padding_mask[all_pad, 0] = False
+        attn_mask = self.causal_attn_mask[:seqlen, :seqlen]
+        for blk in self.blocks:
+            x = blk(x, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+            x = x * seq_mask
+
+        x = self.final_ln(x)
+        idx = (len_state.to(inputs.device) - 1).clamp(min=0)
+        pooled = x[torch.arange(bsz, device=inputs.device), idx]
+        ce_logits = self.head_ce(pooled)
+        return ce_logits
+

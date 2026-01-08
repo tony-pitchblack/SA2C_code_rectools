@@ -11,8 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
-from SASRecModules_rectools import SASRecQNetworkRectools
-from SASRecModules_torch import SASRecQNetworkTorch
+from SASRecModules_torch import SASRecBaselineTorch, SASRecQNetworkTorch
 import yaml
 
 try:
@@ -29,11 +28,17 @@ def parse_args():
     parser.add_argument("--early_stopping_metric", type=str, default=None, help="Early stopping metric (ndcg@10).")
     parser.add_argument("--max_steps", type=int, default=None, help="If set, stop after this many update steps.")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging and NaN checks (overrides config).")
+    parser.add_argument(
+        "--smoke-cpu",
+        action="store_true",
+        help="Force CPU, set batch_size=8, run 1 epoch, and skip writing val/test result files (keeps logging).",
+    )
     return parser.parse_args()
 
 
 def _default_config():
     return {
+        "enable_sa2c": True,
         "seed": 0,
         "epoch": 50,
         "dataset": "retailrocket",
@@ -63,7 +68,6 @@ def _default_config():
         "debug": False,
         "early_stopping_ep": 5,
         "early_stopping_metric": "ndcg@10",
-        "use_rectoools_backbone": False,
     }
 
 
@@ -136,18 +140,6 @@ def pad_history_left(itemlist, length, pad_item):
     return [pad_item] * (length - len(itemlist)) + itemlist
 
 
-def _shift_ids_and_leftpad_rightpadded(x: torch.Tensor, old_pad_id: int) -> torch.Tensor:
-    x = torch.where(x == int(old_pad_id), torch.zeros_like(x), x + 1)
-    n, l = x.shape
-    counts = (x != 0).sum(dim=1).clamp(min=0, max=l)
-    cols = torch.arange(l, device=x.device).unsqueeze(0).expand(n, l)
-    shift = (l - counts).unsqueeze(1)
-    src_index = (cols - shift).clamp(min=0)
-    y = x.gather(1, src_index)
-    y = y.masked_fill(cols < shift, 0)
-    return y
-
-
 def calculate_hit(
     sorted_list,
     topk,
@@ -214,7 +206,21 @@ def _ndcg_reward_from_logits(ce_logits: torch.Tensor, action_t: torch.Tensor) ->
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_backbone: bool = False, epoch=None):
+def evaluate(
+    model,
+    session_loader,
+    reward_click,
+    reward_buy,
+    device,
+    *,
+    split: str = "val",
+    state_size: int,
+    item_num: int,
+    purchase_only: bool = False,
+    debug: bool = False,
+    epoch=None,
+    num_epochs=None,
+):
     total_clicks = 0.0
     total_purchase = 0.0
     topk = [5, 10, 15, 20]
@@ -226,19 +232,37 @@ def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_
     ndcg_purchase = [0.0, 0.0, 0.0, 0.0]
 
     model.eval()
-    for state, len_state, action, reward in tqdm(
-        val_loader,
-        desc="val",
+    for items_pad, is_buy_pad, lengths in tqdm(
+        session_loader,
+        desc=str(split),
         unit="batch",
         dynamic_ncols=True,
         leave=False,
     ):
-        state_t = state.to(device, non_blocking=True)
-        len_state_t = len_state.to(device, non_blocking=True)
-        _, ce_logits = model(state_t, len_state_t)
-        if bool(use_rectools_backbone):
-            ce_logits = ce_logits.clone()
-            ce_logits[:, 0] = float("-inf")
+        step = _make_step_batch_from_sessions(
+            items_pad,
+            is_buy_pad,
+            lengths,
+            state_size=int(state_size),
+            pad_item=int(item_num),
+            purchase_only=bool(purchase_only),
+        )
+        if step is None:
+            continue
+        state_t = step["state"].to(device, non_blocking=True)
+        len_state_t = step["len_state"].to(device, non_blocking=True)
+        action_t = step["action"]
+        is_buy_t = step["is_buy"]
+        reward_t = torch.where(is_buy_t == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+        action_t = action_t.to(device, non_blocking=True)
+        reward_t = reward_t.to(device, non_blocking=True)
+        out = model(state_t, len_state_t)
+        if isinstance(out, (tuple, list)):
+            if len(out) != 2:
+                raise ValueError(f"Expected model output (q_values, ce_logits), got tuple/list of len={len(out)}")
+            ce_logits = out[1]
+        else:
+            ce_logits = out
         if debug and (not torch.isfinite(ce_logits).all()):
             raise FloatingPointError("Non-finite ce_logits during evaluation")
         kmax = int(max(topk))
@@ -247,8 +271,8 @@ def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_
         idx_sorted = idx.gather(1, order)
         sorted_list = idx_sorted.detach().cpu().numpy()
 
-        actions = action.detach().cpu().numpy()
-        rewards = reward.detach().cpu().numpy()
+        actions = action_t.detach().cpu().numpy()
+        rewards = reward_t.detach().cpu().numpy()
         total_clicks += float((rewards == reward_click).sum())
         total_purchase += float((rewards != reward_click).sum())
         calculate_hit(
@@ -280,9 +304,14 @@ def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_
         overall[f"ndcg@{k}"] = float((ndcg_clicks[i] + ndcg_purchase[i]) / denom_all) if denom_all > 0 else 0.0
 
     logger = logging.getLogger(__name__)
-    prefix = f"epoch {epoch} " if epoch is not None else ""
+    if epoch is not None and num_epochs is not None:
+        prefix = f"epoch {int(epoch)}/{int(num_epochs)} "
+    elif epoch is not None:
+        prefix = f"epoch {int(epoch)} "
+    else:
+        prefix = ""
     logger.info("#############################################################")
-    logger.info("%sval metrics", prefix)
+    logger.info("%s%s metrics", prefix, str(split))
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -299,142 +328,137 @@ def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_
     }
 
 
-class _ReplayBufferDataset(Dataset):
-    def __init__(self, state, len_state, next_state, len_next_state, action, is_buy, is_done, purchase_only: bool = False):
+class _SessionDataset(Dataset):
+    def __init__(self, data_directory: str, split_df_name: str):
         super().__init__()
-        if purchase_only:
-            mask = is_buy == 1
-            self.state = state[mask]
-            self.len_state = len_state[mask]
-            self.next_state = next_state[mask]
-            self.len_next_state = len_next_state[mask]
-            self.action = action[mask]
-            self.is_buy = is_buy[mask]
-            self.is_done = is_done[mask]
-        else:
-            self.state = state
-            self.len_state = len_state
-            self.next_state = next_state
-            self.len_next_state = len_next_state
-            self.action = action
-            self.is_buy = is_buy
-            self.is_done = is_done
+        df = pd.read_pickle(os.path.join(data_directory, split_df_name))
+        groups = df.groupby("session_id", sort=False)
+        items_list = []
+        is_buy_list = []
+        for _, group in groups:
+            items = torch.from_numpy(group["item_id"].to_numpy(dtype=np.int64, copy=True))
+            is_buy = torch.from_numpy(group["is_buy"].to_numpy(dtype=np.int64, copy=True))
+            if items.numel() == 0:
+                continue
+            items_list.append(items)
+            is_buy_list.append(is_buy)
+        self.items_list = items_list
+        self.is_buy_list = is_buy_list
 
     def __len__(self):
-        return int(self.action.shape[0])
+        return int(len(self.items_list))
 
-    def __getitem__(self, idx):
-        return (
-            self.state[idx],
-            self.len_state[idx],
-            self.next_state[idx],
-            self.len_next_state[idx],
-            self.action[idx],
-            self.is_buy[idx],
-            self.is_done[idx],
-        )
+    def __getitem__(self, idx: int):
+        return self.items_list[idx], self.is_buy_list[idx]
 
 
-class _ValDataset(Dataset):
-    def __init__(self, state, len_state, action, reward, reward_click: float, purchase_only: bool = False):
-        super().__init__()
-        if purchase_only:
-            mask = reward != float(reward_click)
-            self.state = state[mask]
-            self.len_state = len_state[mask]
-            self.action = action[mask]
-            self.reward = reward[mask]
-        else:
-            self.state = state
-            self.len_state = len_state
-            self.action = action
-            self.reward = reward
-
-    def __len__(self):
-        return int(self.action.shape[0])
-
-    def __getitem__(self, idx):
-        return self.state[idx], self.len_state[idx], self.action[idx], self.reward[idx]
+def _collate_sessions(batch, pad_item: int):
+    items_list, is_buy_list = zip(*batch)
+    lengths = torch.as_tensor([int(x.numel()) for x in items_list], dtype=torch.long)
+    lmax = int(lengths.max().item()) if lengths.numel() > 0 else 0
+    bsz = int(len(items_list))
+    items_pad = torch.full((bsz, lmax), int(pad_item), dtype=torch.long)
+    is_buy_pad = torch.zeros((bsz, lmax), dtype=torch.long)
+    for i, (items, is_buy) in enumerate(zip(items_list, is_buy_list)):
+        n = int(items.numel())
+        if n == 0:
+            continue
+        items_pad[i, :n] = items
+        is_buy_pad[i, :n] = is_buy
+    return items_pad, is_buy_pad, lengths
 
 
-def _build_eval_tensors(
-    data_directory, split_df_name, state_size, item_num, reward_click, reward_buy, use_rectools_backbone: bool = False
+def _make_step_batch_from_sessions(
+    items_pad: torch.Tensor,
+    is_buy_pad: torch.Tensor,
+    lengths: torch.Tensor,
+    *,
+    state_size: int,
+    pad_item: int,
+    purchase_only: bool,
 ):
-    eval_sessions = pd.read_pickle(os.path.join(data_directory, split_df_name))
-    groups = eval_sessions.groupby("session_id", sort=False)
+    bsz, lmax = items_pad.shape
+    s = int(state_size)
+    if lmax == 0:
+        return None
+    t = torch.arange(lmax, device=items_pad.device, dtype=torch.long)  # [L]
+    j = torch.arange(s, device=items_pad.device, dtype=torch.long)  # [S]
+    idx1 = j.unsqueeze(0).expand(lmax, s)  # [L,S]
+    t_col = t.unsqueeze(1)  # [L,1]
 
-    states = []
-    len_states = []
-    actions = []
-    rewards = []
-    for _, group in groups:
-        history = []
-        for _, row in group.iterrows():
-            state = list(history)
-            len_states.append(state_size if len(state) >= state_size else 1 if len(state) == 0 else len(state))
-            if bool(use_rectools_backbone):
-                states.append(pad_history_left(state, state_size, 0))
-                action = int(row["item_id"]) + 1
-            else:
-                states.append(pad_history(state, state_size, item_num))
-                action = int(row["item_id"])
-            is_buy = int(row["is_buy"])
-            reward = reward_buy if is_buy == 1 else reward_click
-            actions.append(action)
-            rewards.append(float(reward))
-            history.append(action)
+    idx_state = torch.where(t_col < s, idx1, (t_col - s) + idx1)  # [L,S]
+    idx_state_oob = idx_state >= lmax
+    idx_state_safe = idx_state.clamp(min=0, max=lmax - 1)
+    idx_state_b = idx_state_safe.unsqueeze(0).expand(bsz, lmax, s)
+    items_pad_3 = items_pad.unsqueeze(2).expand(bsz, lmax, s)
+    state_all = items_pad_3.gather(1, idx_state_b)
+    invalid_state = (t_col < s) & (idx1 >= t_col)
+    invalid_state = invalid_state | idx_state_oob
+    state_all = state_all.masked_fill(invalid_state.unsqueeze(0).expand(bsz, lmax, s), int(pad_item))
 
-    state_t = torch.from_numpy(np.asarray(states, dtype=np.int64))
-    len_state_t = torch.from_numpy(np.asarray(len_states, dtype=np.int64))
-    action_t = torch.from_numpy(np.asarray(actions, dtype=np.int64))
-    reward_t = torch.from_numpy(np.asarray(rewards, dtype=np.float32))
-    return state_t, len_state_t, action_t, reward_t
+    tnext_col = (t + 1).unsqueeze(1)
+    idx_next = torch.where(tnext_col < s, idx1, (tnext_col - s) + idx1)
+    idx_next_oob = idx_next >= lmax
+    idx_next_safe = idx_next.clamp(min=0, max=lmax - 1)
+    idx_next_b = idx_next_safe.unsqueeze(0).expand(bsz, lmax, s)
+    next_state_all = items_pad_3.gather(1, idx_next_b)
+    invalid_next = (tnext_col < s) & (idx1 >= tnext_col)
+    invalid_next = invalid_next | idx_next_oob
+    next_state_all = next_state_all.masked_fill(invalid_next.unsqueeze(0).expand(bsz, lmax, s), int(pad_item))
+
+    action_all = items_pad
+    is_buy_all = is_buy_pad
+    valid = t.unsqueeze(0) < lengths.unsqueeze(1)
+    if bool(purchase_only):
+        valid = valid & (is_buy_all == 1)
+
+    if not bool(valid.any()):
+        return None
+
+    flat_mask = valid.reshape(-1)
+    state_steps = state_all.reshape(-1, s)[flat_mask]
+    next_state_steps = next_state_all.reshape(-1, s)[flat_mask]
+    action_steps = action_all.reshape(-1)[flat_mask]
+    is_buy_steps = is_buy_all.reshape(-1)[flat_mask]
+
+    len_state = t.clamp(min=1, max=s).unsqueeze(0).expand(bsz, lmax).reshape(-1)[flat_mask]
+    len_next = (t + 1).clamp(min=1, max=s).unsqueeze(0).expand(bsz, lmax).reshape(-1)[flat_mask]
+
+    done_all = t.unsqueeze(0).eq((lengths - 1).unsqueeze(1)) & valid
+    done_steps = done_all.reshape(-1)[flat_mask]
+
+    return {
+        "state": state_steps,
+        "len_state": len_state,
+        "next_state": next_state_steps,
+        "len_next_state": len_next,
+        "action": action_steps,
+        "is_buy": is_buy_steps,
+        "done": done_steps,
+    }
 
 
-def _build_eval_dataset(
-    data_directory,
-    split_df_name,
-    state_size,
-    item_num,
-    reward_click,
-    reward_buy,
-    purchase_only: bool = False,
-    use_rectools_backbone: bool = False,
+def _make_session_loader(
+    ds: Dataset,
+    *,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool,
+    pad_item: int,
+    shuffle: bool,
+    sampler=None,
 ):
-    state, len_state, action, reward = _build_eval_tensors(
-        data_directory=data_directory,
-        split_df_name=split_df_name,
-        state_size=state_size,
-        item_num=item_num,
-        reward_click=reward_click,
-        reward_buy=reward_buy,
-        use_rectools_backbone=bool(use_rectools_backbone),
-    )
-    return _ValDataset(
-        state=state,
-        len_state=len_state,
-        action=action,
-        reward=reward,
-        reward_click=float(reward_click),
-        purchase_only=bool(purchase_only),
-    )
-
-
-def _make_eval_loader(
-    ds,
-    batch_size,
-    num_workers,
-    pin_memory,
-):
-    persistent_workers = num_workers > 0
+    persistent_workers = int(num_workers) > 0
     return DataLoader(
         ds,
         batch_size=int(batch_size),
-        shuffle=False,
+        shuffle=bool(shuffle) if sampler is None else False,
+        sampler=sampler,
         num_workers=int(num_workers),
-        pin_memory=pin_memory,
+        pin_memory=bool(pin_memory),
         persistent_workers=persistent_workers,
         drop_last=False,
+        collate_fn=lambda b: _collate_sessions(b, pad_item=int(pad_item)),
     )
 
 
@@ -475,6 +499,10 @@ def main():
     config_path = args.config
     cfg = _load_config(config_path)
     cfg = _apply_cli_overrides(cfg, args)
+    if bool(cfg.get("use_rectoools_backbone", False)) or bool(cfg.get("use_rectools_backbone", False)):
+        raise ValueError(
+            "This script is torch-only. For rectools backbone / per-position logits, run SA2C_SASRec_rectools.py."
+        )
     if str(cfg.get("early_stopping_metric", "ndcg@10")) != "ndcg@10":
         raise ValueError("Only early_stopping_metric='ndcg@10' is supported.")
     reward_fn = str(cfg.get("reward_fn", "click_buy"))
@@ -490,6 +518,8 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info("run_dir: %s", str(run_dir))
     logger.info("dataset: %s", dataset_name)
+    if bool(getattr(args, "smoke_cpu", False)):
+        logger.info("smoke_cpu: enabled (forcing CPU, batch_size=8, epoch=1, skipping val/test result file writing)")
 
     seed = int(cfg.get("seed", 0))
     random.seed(seed)
@@ -499,136 +529,143 @@ def main():
     num_epochs = int(cfg.get("epoch", 50))
     max_steps = int(cfg.get("max_steps", 0))
 
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{int(cfg.get('device_id', 0))}")
-    else:
+    smoke_cpu = bool(getattr(args, "smoke_cpu", False))
+    if smoke_cpu:
         device = torch.device("cpu")
+        num_epochs = 1
+        train_batch_size = 8
+        val_batch_size = 8
+        train_num_workers = 0
+        val_num_workers = 0
+    else:
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{int(cfg.get('device_id', 0))}")
+        else:
+            device = torch.device("cpu")
+
+    if bool(cfg.get("debug", False)) and device.type == "cuda":
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
 
     data_rel = str(cfg.get("data", "data"))
     data_directory = str(dataset_root / data_rel)
     data_statis = pd.read_pickle(os.path.join(data_directory, "data_statis.df"))
     state_size = int(data_statis["state_size"][0])
     item_num = int(data_statis["item_num"][0])
-    use_rectools_backbone = bool(cfg.get("use_rectoools_backbone", cfg.get("use_rectools_backbone", False)))
+    if bool(cfg.get("debug", False)):
+        logger.debug(
+            "model_cfg state_size=%d hidden_factor=%d num_heads=%d item_num=%d",
+            int(state_size),
+            int(cfg.get("hidden_factor", 64)),
+            int(cfg.get("num_heads", 1)),
+            int(item_num),
+        )
     reward_click = float(cfg.get("r_click", 0.2))
     reward_buy = float(cfg.get("r_buy", 1.0))
     reward_negative = float(cfg.get("r_negative", -0.0))
     purchase_only = bool(cfg.get("purchase_only", False))
+    enable_sa2c = bool(cfg.get("enable_sa2c", True))
 
-    train_batch_size = int(cfg.get("batch_size_train", 256))
-    val_batch_size = int(cfg.get("batch_size_val", 256))
-    train_num_workers = int(cfg.get("num_workers_train", 0))
-    val_num_workers = int(cfg.get("num_workers_val", 0))
+    if not smoke_cpu:
+        train_batch_size = int(cfg.get("batch_size_train", 256))
+        val_batch_size = int(cfg.get("batch_size_val", 256))
+        train_num_workers = int(cfg.get("num_workers_train", 0))
+        val_num_workers = int(cfg.get("num_workers_val", 0))
 
-    replay_buffer = pd.read_pickle(os.path.join(data_directory, "replay_buffer.df"))
     with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
         pop_dict = eval(f.read())
 
-    qnet_cls = SASRecQNetworkRectools if use_rectools_backbone else SASRecQNetworkTorch
-    qn1 = qnet_cls(
-        item_num=item_num,
-        state_size=state_size,
-        hidden_size=int(cfg.get("hidden_factor", 64)),
-        num_heads=int(cfg.get("num_heads", 1)),
-        num_blocks=int(cfg.get("num_blocks", 1)),
-        dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-    ).to(device)
-    qn2 = qnet_cls(
-        item_num=item_num,
-        state_size=state_size,
-        hidden_size=int(cfg.get("hidden_factor", 64)),
-        num_heads=int(cfg.get("num_heads", 1)),
-        num_blocks=int(cfg.get("num_blocks", 1)),
-        dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-    ).to(device)
-
-    opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
-    opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+    if enable_sa2c:
+        qn1 = SASRecQNetworkTorch(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        qn2 = SASRecQNetworkTorch(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+        opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+    else:
+        model = SASRecBaselineTorch(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=float(cfg.get("lr", 0.005)))
 
     total_step = 0
-    num_rows = replay_buffer.shape[0]
-    num_batches = int(num_rows / train_batch_size)
+    pin_memory = True
+
+    t0 = time.perf_counter()
+    train_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_train.df")
+    train_ds_s = time.perf_counter() - t0
+    num_sessions = int(len(train_ds))
+    num_batches = int(num_sessions / train_batch_size)
     if num_batches <= 0:
         logger.warning(
-            "num_batches=%d (num_rows=%d, train_batch_size=%d) -> no training batches will run; metrics will be static",
+            "num_batches=%d (num_sessions=%d, train_batch_size=%d) -> no training batches will run; metrics will be static",
             int(num_batches),
-            int(num_rows),
+            int(num_sessions),
             int(train_batch_size),
         )
 
-    t0 = time.perf_counter()
-    state_all = torch.from_numpy(np.asarray(replay_buffer["state"].tolist(), dtype=np.int64))
-    len_state_all = torch.from_numpy(np.asarray(replay_buffer["len_state"].to_numpy(), dtype=np.int64))
-    next_state_all = torch.from_numpy(np.asarray(replay_buffer["next_state"].tolist(), dtype=np.int64))
-    len_next_state_all = torch.from_numpy(np.asarray(replay_buffer["len_next_states"].to_numpy(), dtype=np.int64))
-    action_all = torch.from_numpy(np.asarray(replay_buffer["action"].to_numpy(), dtype=np.int64))
-    is_buy_all = torch.from_numpy(np.asarray(replay_buffer["is_buy"].to_numpy(), dtype=np.int64))
-    done_all = torch.from_numpy(np.asarray(replay_buffer["is_done"].to_numpy(), dtype=np.bool_))
-
-    if use_rectools_backbone:
-        action_all = action_all + 1
-        old_pad_id = int(item_num)
-        state_all = _shift_ids_and_leftpad_rightpadded(state_all, old_pad_id=old_pad_id)
-        next_state_all = _shift_ids_and_leftpad_rightpadded(next_state_all, old_pad_id=old_pad_id)
-
-    ds = _ReplayBufferDataset(
-        state=state_all,
-        len_state=len_state_all,
-        next_state=next_state_all,
-        len_next_state=len_next_state_all,
-        action=action_all,
-        is_buy=is_buy_all,
-        is_done=done_all,
-        purchase_only=purchase_only,
-    )
-    train_ds_s = time.perf_counter() - t0
-
-    pin_memory = device.type == "cuda"
     train_persistent_workers = train_num_workers > 0
     t0 = time.perf_counter()
-    val_ds = _build_eval_dataset(
+    val_ds = _SessionDataset(
         data_directory=data_directory,
         split_df_name="sampled_val.df",
-        state_size=state_size,
-        item_num=item_num,
-        reward_click=reward_click,
-        reward_buy=reward_buy,
-        purchase_only=purchase_only,
-        use_rectools_backbone=use_rectools_backbone,
     )
     val_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    val_dl = _make_eval_loader(val_ds, val_batch_size, val_num_workers, pin_memory)
+    val_dl = _make_session_loader(
+        val_ds,
+        batch_size=val_batch_size,
+        num_workers=val_num_workers,
+        pin_memory=pin_memory,
+        pad_item=item_num,
+        shuffle=False,
+    )
     val_dl_s = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    test_ds = _build_eval_dataset(
+    test_ds = _SessionDataset(
         data_directory=data_directory,
         split_df_name="sampled_test.df",
-        state_size=state_size,
-        item_num=item_num,
-        reward_click=reward_click,
-        reward_buy=reward_buy,
-        purchase_only=purchase_only,
-        use_rectools_backbone=use_rectools_backbone,
     )
     test_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    test_dl = _make_eval_loader(test_ds, val_batch_size, val_num_workers, pin_memory)
+    test_dl = _make_session_loader(
+        test_ds,
+        batch_size=val_batch_size,
+        num_workers=val_num_workers,
+        pin_memory=pin_memory,
+        pad_item=item_num,
+        shuffle=False,
+    )
     test_dl_s = time.perf_counter() - t0
 
-    behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
-    for k, v in pop_dict.items():
-        kk = int(k)
-        if use_rectools_backbone:
-            if 0 <= kk < item_num:
-                behavior_prob_table[kk + 1] = float(v)
-        else:
+    if enable_sa2c:
+        behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
+        for k, v in pop_dict.items():
+            kk = int(k)
             if 0 <= kk <= item_num:
                 behavior_prob_table[kk] = float(v)
-    behavior_prob_table = behavior_prob_table.to(device)
+        behavior_prob_table = behavior_prob_table.to(device)
 
     early_patience = int(cfg.get("early_stopping_ep", 5))
     best_metric = float("-inf")
@@ -638,26 +675,30 @@ def main():
     for epoch_idx in range(num_epochs):
         if bool(cfg.get("debug", False)):
             logger.debug(
-                "epoch=%d/%d num_rows=%d train_batch_size=%d num_batches=%d total_step=%d",
+                "epoch=%d/%d num_sessions=%d train_batch_size=%d num_batches=%d total_step=%d",
                 int(epoch_idx + 1),
                 int(num_epochs),
-                int(num_rows),
+                int(num_sessions),
                 int(train_batch_size),
                 int(num_batches),
                 int(total_step),
             )
-        sampler = RandomSampler(ds, replacement=True, num_samples=num_batches * int(train_batch_size))
-        t0 = time.perf_counter()
-        dl = DataLoader(
-            ds,
-            batch_size=int(train_batch_size),
-            sampler=sampler,
-            num_workers=train_num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=train_persistent_workers,
-            drop_last=True,
-        )
-        train_dl_s = time.perf_counter() - t0
+        if num_batches > 0:
+            sampler = RandomSampler(train_ds, replacement=True, num_samples=num_batches * int(train_batch_size))
+            t0 = time.perf_counter()
+            dl = _make_session_loader(
+                train_ds,
+                batch_size=train_batch_size,
+                num_workers=train_num_workers,
+                pin_memory=pin_memory,
+                pad_item=item_num,
+                shuffle=False,
+                sampler=sampler,
+            )
+            train_dl_s = time.perf_counter() - t0
+        else:
+            dl = []
+            train_dl_s = 0.0
         if epoch_idx == 0:
             logger.info(
                 "build_s train_ds=%.3f train_dl=%.3f val_ds=%.3f val_dl=%.3f test_ds=%.3f test_dl=%.3f",
@@ -678,110 +719,146 @@ def main():
             if max_steps > 0 and total_step >= max_steps:
                 stop_training = True
                 break
-            state, len_state, next_state, len_next_state, action, is_buy, is_done = batch
-            discount = torch.full_like(is_buy, float(cfg.get("discount", 0.5)), dtype=torch.float32)
-
-            pointer = np.random.randint(0, 2)
-            if pointer == 0:
-                main_qn, target_qn = qn1, qn2
-                opt1, opt2 = opt1_qn1, opt2_qn1
-            else:
-                main_qn, target_qn = qn2, qn1
-                opt1, opt2 = opt1_qn2, opt2_qn2
-
-            main_qn.train()
-            target_qn.train()
+            items_pad, is_buy_pad, lengths = batch
+            step = _make_step_batch_from_sessions(
+                items_pad,
+                is_buy_pad,
+                lengths,
+                state_size=int(state_size),
+                pad_item=int(item_num),
+                purchase_only=bool(purchase_only),
+            )
+            if step is None:
+                continue
+            state = step["state"]
+            len_state = step["len_state"]
+            action = step["action"]
+            step_count = int(action.shape[0])
 
             state_t = state.to(device, non_blocking=pin_memory)
             len_state_t = len_state.to(device, non_blocking=pin_memory)
-            next_state_t = next_state.to(device, non_blocking=pin_memory)
-            len_next_state_t = len_next_state.to(device, non_blocking=pin_memory)
             action_t = action.to(device, non_blocking=pin_memory).to(torch.long)
-            discount_t = discount.to(device, non_blocking=pin_memory)
-            done_t = is_done.to(device, non_blocking=pin_memory).to(torch.float32)
 
-            if use_rectools_backbone:
-                neg_actions_t = _sample_negative_actions(1, item_num + 1, action_t, int(cfg.get("neg", 10)), device=device)
-            else:
+            if enable_sa2c:
+                next_state = step["next_state"]
+                len_next_state = step["len_next_state"]
+                is_buy = step["is_buy"]
+                is_done = step["done"]
+                discount = torch.full((step_count,), float(cfg.get("discount", 0.5)), dtype=torch.float32)
+
+                pointer = np.random.randint(0, 2)
+                if pointer == 0:
+                    main_qn, target_qn = qn1, qn2
+                    opt1, opt2 = opt1_qn1, opt2_qn1
+                else:
+                    main_qn, target_qn = qn2, qn1
+                    opt1, opt2 = opt1_qn2, opt2_qn2
+
+                main_qn.train()
+                target_qn.train()
+
+                next_state_t = next_state.to(device, non_blocking=pin_memory)
+                len_next_state_t = len_next_state.to(device, non_blocking=pin_memory)
+                discount_t = discount.to(device, non_blocking=pin_memory)
+                done_t = is_done.to(device, non_blocking=pin_memory).to(torch.float32)
+
                 neg_actions_t = _sample_negative_actions(0, item_num, action_t, int(cfg.get("neg", 10)), device=device)
 
-            with torch.no_grad():
-                q_next_target, _ = target_qn(next_state_t, len_next_state_t)
-                q_next_selector, _ = main_qn(next_state_t, len_next_state_t)
-                q_curr_target, _ = target_qn(state_t, len_state_t)
+                with torch.no_grad():
+                    q_next_target, _ = target_qn(next_state_t, len_next_state_t)
+                    q_next_selector, _ = main_qn(next_state_t, len_next_state_t)
+                    q_curr_target, _ = target_qn(state_t, len_state_t)
 
-            q_values, ce_logits = main_qn(state_t, len_state_t)
-            if bool(cfg.get("debug", False)):
-                if not torch.isfinite(q_values).all():
-                    raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
-                if not torch.isfinite(ce_logits).all():
+                q_values, ce_logits = main_qn(state_t, len_state_t)
+                if bool(cfg.get("debug", False)):
+                    if not torch.isfinite(q_values).all():
+                        raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
+                    if not torch.isfinite(ce_logits).all():
+                        raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
+
+                if reward_fn == "ndcg":
+                    with torch.no_grad():
+                        reward_t = _ndcg_reward_from_logits(ce_logits.detach(), action_t)
+                else:
+                    reward_t = torch.where(is_buy == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+                    reward_t = reward_t.to(device, non_blocking=pin_memory)
+
+                a_star = q_next_selector.argmax(dim=1)
+                q_tp1 = q_next_target.gather(1, a_star[:, None]).squeeze(1)
+                target_pos = reward_t + discount_t * q_tp1 * (1.0 - done_t)
+                q_sa = q_values.gather(1, action_t[:, None]).squeeze(1)
+                qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
+
+                a_star_curr = q_values.detach().argmax(dim=1)
+                q_t_star = q_curr_target.gather(1, a_star_curr[:, None]).squeeze(1)
+                target_neg = reward_negative + discount_t * q_t_star
+                q_sneg = q_values.gather(1, neg_actions_t)
+                qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
+
+                ce_loss_pre = F.cross_entropy(ce_logits, action_t, reduction="none")
+
+                if total_step < 15000:
+                    loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
+                    if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
+                        raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
+                    opt1.zero_grad(set_to_none=True)
+                    loss.backward()
+                    opt1.step()
+                    total_step += int(step_count)
+                else:
+                    with torch.no_grad():
+                        prob = F.softmax(ce_logits, dim=1).gather(1, action_t[:, None]).squeeze(1)
+                    behavior_prob = behavior_prob_table[action_t]
+                    ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
+
+                    with torch.no_grad():
+                        q_pos_det = q_values.gather(1, action_t[:, None]).squeeze(1)
+                        q_neg_det = q_values.gather(1, neg_actions_t).sum(dim=1)
+                        q_avg = (q_pos_det + q_neg_det) / float(1 + int(cfg.get("neg", 10)))
+                        advantage = q_pos_det - q_avg
+                        if float(cfg.get("clip", 0.0)) > 0:
+                            advantage = advantage.clamp(-float(cfg.get("clip", 0.0)), float(cfg.get("clip", 0.0)))
+
+                    ce_loss_post = ips * ce_loss_pre * advantage
+                    loss = float(cfg.get("weight", 1.0)) * (qloss_pos + qloss_neg) + ce_loss_post.mean()
+                    if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
+                        raise FloatingPointError(f"Non-finite loss (phase2) at total_step={int(total_step)}")
+                    opt2.zero_grad(set_to_none=True)
+                    loss.backward()
+                    opt2.step()
+                    total_step += int(step_count)
+            else:
+                model.train()
+                ce_logits = model(state_t, len_state_t)
+                if bool(cfg.get("debug", False)) and (not torch.isfinite(ce_logits).all()):
                     raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
-
-            if reward_fn == "ndcg":
-                with torch.no_grad():
-                    reward_t = _ndcg_reward_from_logits(ce_logits.detach(), action_t)
-            else:
-                reward_t = torch.where(is_buy == 1, float(reward_buy), float(reward_click)).to(torch.float32)
-                reward_t = reward_t.to(device, non_blocking=pin_memory)
-
-            a_star = q_next_selector.argmax(dim=1)
-            q_tp1 = q_next_target.gather(1, a_star[:, None]).squeeze(1)
-            target_pos = reward_t + discount_t * q_tp1 * (1.0 - done_t)
-            q_sa = q_values.gather(1, action_t[:, None]).squeeze(1)
-            qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
-
-            a_star_curr = q_values.detach().argmax(dim=1)
-            q_t_star = q_curr_target.gather(1, a_star_curr[:, None]).squeeze(1)
-            target_neg = reward_negative + discount_t * q_t_star
-            q_sneg = q_values.gather(1, neg_actions_t)
-            qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
-
-            ce_loss_pre = F.cross_entropy(ce_logits, action_t, reduction="none")
-
-            if total_step < 15000:
-                loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
+                loss = F.cross_entropy(ce_logits, action_t)
                 if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
-                    raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
-                opt1.zero_grad(set_to_none=True)
+                    raise FloatingPointError(f"Non-finite loss at total_step={int(total_step)}")
+                opt.zero_grad(set_to_none=True)
                 loss.backward()
-                opt1.step()
-                total_step += 1
-            else:
-                with torch.no_grad():
-                    prob = F.softmax(ce_logits, dim=1).gather(1, action_t[:, None]).squeeze(1)
-                behavior_prob = behavior_prob_table[action_t]
-                ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
+                opt.step()
+                total_step += int(step_count)
 
-                with torch.no_grad():
-                    q_pos_det = q_values.gather(1, action_t[:, None]).squeeze(1)
-                    q_neg_det = q_values.gather(1, neg_actions_t).sum(dim=1)
-                    q_avg = (q_pos_det + q_neg_det) / float(1 + int(cfg.get("neg", 10)))
-                    advantage = q_pos_det - q_avg
-                    if float(cfg.get("clip", 0.0)) > 0:
-                        advantage = advantage.clamp(-float(cfg.get("clip", 0.0)), float(cfg.get("clip", 0.0)))
-
-                ce_loss_post = ips * ce_loss_pre * advantage
-                loss = float(cfg.get("weight", 1.0)) * (qloss_pos + qloss_neg) + ce_loss_post.mean()
-                if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
-                    raise FloatingPointError(f"Non-finite loss (phase2) at total_step={int(total_step)}")
-                opt2.zero_grad(set_to_none=True)
-                loss.backward()
-                opt2.step()
-                total_step += 1
         val_metrics = evaluate(
-            qn1,
+            qn1 if enable_sa2c else model,
             val_dl,
             reward_click,
+            reward_buy,
             device,
             debug=bool(cfg.get("debug", False)),
-            use_rectools_backbone=use_rectools_backbone,
+            split="val",
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
             epoch=int(epoch_idx + 1),
+            num_epochs=int(num_epochs),
         )
         metric = float(val_metrics["overall"].get("ndcg@10", 0.0))
         if metric > best_metric:
             best_metric = metric
             epochs_since_improve = 0
-            torch.save(qn1.state_dict(), run_dir / "best_model.pt")
+            torch.save((qn1 if enable_sa2c else model).state_dict(), run_dir / "best_model.pt")
             logger.info("best_model.pt updated (val ndcg@10=%f)", float(best_metric))
         else:
             epochs_since_improve += 1
@@ -801,9 +878,9 @@ def main():
 
     best_path = run_dir / "best_model.pt"
     if not best_path.exists():
-        torch.save(qn1.state_dict(), best_path)
+        torch.save((qn1 if enable_sa2c else model).state_dict(), best_path)
 
-    best_model = qnet_cls(
+    best_model = (SASRecQNetworkTorch if enable_sa2c else SASRecBaselineTorch)(
         item_num=item_num,
         state_size=state_size,
         hidden_size=int(cfg.get("hidden_factor", 64)),
@@ -814,10 +891,28 @@ def main():
     best_model.load_state_dict(torch.load(best_path, map_location=device))
 
     val_best = evaluate(
-        best_model, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)), use_rectools_backbone=use_rectools_backbone
+        best_model,
+        val_dl,
+        reward_click,
+        reward_buy,
+        device,
+        debug=bool(cfg.get("debug", False)),
+        split="val(best)",
+        state_size=state_size,
+        item_num=item_num,
+        purchase_only=purchase_only,
     )
     test_best = evaluate(
-        best_model, test_dl, reward_click, device, debug=bool(cfg.get("debug", False)), use_rectools_backbone=use_rectools_backbone
+        best_model,
+        test_dl,
+        reward_click,
+        reward_buy,
+        device,
+        debug=bool(cfg.get("debug", False)),
+        split="test(best)",
+        state_size=state_size,
+        item_num=item_num,
+        purchase_only=purchase_only,
     )
 
     val_click = _metrics_row(val_best, "click")
@@ -844,10 +939,11 @@ def main():
         purchase_row[f"val/ndcg@{k}"] = float(val_purchase.get(f"ndcg@{k}", 0.0))
         purchase_row[f"test/ndcg@{k}"] = float(test_purchase.get(f"ndcg@{k}", 0.0))
 
-    df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
-    df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
-    df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
-    df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
+    if not smoke_cpu:
+        df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
+        df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
+        df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
+        df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
 
     overall_col_order = []
     for k in val_best["topk"]:
@@ -856,11 +952,12 @@ def main():
     for k in val_best["topk"]:
         overall_row[f"val/ndcg@{k}"] = float(val_overall.get(f"ndcg@{k}", 0.0))
         overall_row[f"test/ndcg@{k}"] = float(test_overall.get(f"ndcg@{k}", 0.0))
-    df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
-    df_overall.to_csv(run_dir / "results.csv", index=False)
+    if not smoke_cpu:
+        df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
+        df_overall.to_csv(run_dir / "results.csv", index=False)
 
-    with open(run_dir / "summary@10.txt", "w") as f:
-        f.write(_summary_at_k_text(val_best, test_best, k=10))
+        with open(run_dir / "summary@10.txt", "w") as f:
+            f.write(_summary_at_k_text(val_best, test_best, k=10))
 
 
 if __name__ == "__main__":
