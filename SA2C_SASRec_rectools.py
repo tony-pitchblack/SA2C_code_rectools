@@ -477,10 +477,35 @@ def _summary_at_k_text(val_metrics: dict, test_metrics: dict, k: int):
     def g(m: dict, section: str, key: str):
         return float(m.get(section, {}).get(key, 0.0))
 
+    def fmt(v: float, base: float | None):
+        if base is None:
+            return f"{v:.6f}"
+        return f"{v:.6f} ({(v - base):+.6f})"
+
     lines = [
         f"overall val/ndcg@{k}={g(val_metrics, 'overall', f'ndcg@{k}'):.6f} test/ndcg@{k}={g(test_metrics, 'overall', f'ndcg@{k}'):.6f}",
         f"click   val/hr@{k}={g(val_metrics, 'click', f'hr@{k}'):.6f} val/ndcg@{k}={g(val_metrics, 'click', f'ndcg@{k}'):.6f}  test/hr@{k}={g(test_metrics, 'click', f'hr@{k}'):.6f} test/ndcg@{k}={g(test_metrics, 'click', f'ndcg@{k}'):.6f}",
         f"purchase val/hr@{k}={g(val_metrics, 'purchase', f'hr@{k}'):.6f} val/ndcg@{k}={g(val_metrics, 'purchase', f'ndcg@{k}'):.6f}  test/hr@{k}={g(test_metrics, 'purchase', f'hr@{k}'):.6f} test/ndcg@{k}={g(test_metrics, 'purchase', f'ndcg@{k}'):.6f}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _summary_at_k_text_with_delta(val_metrics: dict, test_metrics: dict, val_base: dict, test_base: dict, k: int):
+    def g(m: dict, section: str, key: str):
+        return float(m.get(section, {}).get(key, 0.0))
+
+    def fmt(section: str, key: str, *, is_val: bool):
+        m = val_metrics if is_val else test_metrics
+        b = val_base if is_val else test_base
+        v = g(m, section, key)
+        base_v = g(b, section, key)
+        return f"{v:.6f} ({(v - base_v):+.6f})"
+
+    lines = [
+        f"overall val/ndcg@{k}={fmt('overall', f'ndcg@{k}', is_val=True)} test/ndcg@{k}={fmt('overall', f'ndcg@{k}', is_val=False)}",
+        f"click   val/hr@{k}={fmt('click', f'hr@{k}', is_val=True)} val/ndcg@{k}={fmt('click', f'ndcg@{k}', is_val=True)}  test/hr@{k}={fmt('click', f'hr@{k}', is_val=False)} test/ndcg@{k}={fmt('click', f'ndcg@{k}', is_val=False)}",
+        f"purchase val/hr@{k}={fmt('purchase', f'hr@{k}', is_val=True)} val/ndcg@{k}={fmt('purchase', f'ndcg@{k}', is_val=True)}  test/hr@{k}={fmt('purchase', f'hr@{k}', is_val=False)} test/ndcg@{k}={fmt('purchase', f'ndcg@{k}', is_val=False)}",
         "",
     ]
     return "\n".join(lines)
@@ -657,6 +682,9 @@ def main():
         epochs_since_improve_phase2 = 0
 
         phase = "warmup" if use_auto_warmup else "scheduled"
+        warmup_best_metric_scalar = float("-inf")
+        warmup_baseline_finalized = False
+        entered_finetune = False
 
         for epoch_idx in range(num_epochs):
             if num_batches > 0:
@@ -727,6 +755,12 @@ def main():
                     in_warmup = epoch_progress < warmup_epochs
                 else:
                     in_warmup = phase == "warmup"
+            if (not in_warmup) and (not entered_finetune):
+                entered_finetune = True
+                if not warmup_baseline_finalized:
+                    if np.isfinite(best_metric) and best_metric > float("-inf"):
+                        warmup_best_metric_scalar = float(best_metric)
+                        warmup_baseline_finalized = True
 
                 sampled_cfg = cfg.get("sampled_loss") or {}
                 use_sampled_loss = bool(sampled_cfg.get("use", False))
@@ -936,15 +970,29 @@ def main():
                         int(epochs_since_improve_warmup),
                         int(warmup_patience),
                     )
-                    if int(warmup_patience) > 0 and epochs_since_improve_warmup >= int(warmup_patience):
-                        if best_warmup_path.exists():
-                            qn1.load_state_dict(torch.load(best_warmup_path, map_location=device))
-                            qn2.load_state_dict(torch.load(best_warmup_path, map_location=device))
-                        phase = "finetune"
-                        best_metric_phase2 = float("-inf")
-                        epochs_since_improve_phase2 = 0
-                        logger.info("warmup early stopping triggered -> switching to phase2 finetune")
+                if int(warmup_patience) > 0 and epochs_since_improve_warmup >= int(warmup_patience):
+                    warmup_best_metric_scalar = float(best_metric_warmup)
+                    warmup_baseline_finalized = True
+                    entered_finetune = True
+                    if best_warmup_path.exists():
+                        qn1.load_state_dict(torch.load(best_warmup_path, map_location=device))
+                        qn2.load_state_dict(torch.load(best_warmup_path, map_location=device))
+                    phase = "finetune"
+                    best_metric_phase2 = float("-inf")
+                    epochs_since_improve_phase2 = 0
+                    logger.info("warmup early stopping triggered -> switching to phase2 finetune")
+
             elif use_auto_warmup and phase == "finetune":
+                if not warmup_baseline_finalized:
+                    warmup_best_metric_scalar = float(best_metric)
+                    warmup_baseline_finalized = True
+                if np.isfinite(warmup_best_metric_scalar) and warmup_best_metric_scalar > float("-inf"):
+                    logger.info(
+                        "val ndcg@10=%f (delta_vs_warmup=%+.6f, warmup_best=%f)",
+                        float(metric),
+                        float(metric - warmup_best_metric_scalar),
+                        float(warmup_best_metric_scalar),
+                    )
                 if metric > best_metric_phase2:
                     best_metric_phase2 = metric
                     epochs_since_improve_phase2 = 0
@@ -960,7 +1008,22 @@ def main():
                     if early_patience > 0 and epochs_since_improve_phase2 >= early_patience:
                         logger.info("finetune early stopping triggered")
                         break
+
             else:
+                if entered_finetune:
+                    if (not warmup_baseline_finalized) and np.isfinite(metric):
+                        warmup_best_metric_scalar = float(metric)
+                        warmup_baseline_finalized = True
+                    if np.isfinite(warmup_best_metric_scalar) and warmup_best_metric_scalar > float("-inf"):
+                        logger.info(
+                            "val ndcg@10=%f (delta_vs_warmup=%+.6f, warmup_best=%f)",
+                            float(metric),
+                            float(metric - warmup_best_metric_scalar),
+                            float(warmup_best_metric_scalar),
+                        )
+                else:
+                    warmup_best_metric_scalar = float(max(warmup_best_metric_scalar, metric))
+
                 logger.info(
                     "no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
                     float(metric),
@@ -1187,12 +1250,91 @@ def main():
     for k in val_best["topk"]:
         overall_row[f"val/ndcg@{k}"] = float(val_overall.get(f"ndcg@{k}", 0.0))
         overall_row[f"test/ndcg@{k}"] = float(test_overall.get(f"ndcg@{k}", 0.0))
+    warmup_path = run_dir / "best_warmup_model.pt"
+    val_warmup = None
+    test_warmup = None
+    if warmup_path.exists():
+        warmup_model = SASRecQNetworkRectools(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
+
+        val_warmup = evaluate(
+            warmup_model,
+            val_dl,
+            reward_click,
+            reward_buy,
+            device,
+            debug=bool(cfg.get("debug", False)),
+            split="val(best_warmup)",
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+        )
+        test_warmup = evaluate(
+            warmup_model,
+            test_dl,
+            reward_click,
+            reward_buy,
+            device,
+            debug=bool(cfg.get("debug", False)),
+            split="test(best_warmup)",
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+        )
+
+        val_click_w = _metrics_row(val_warmup, "click")
+        test_click_w = _metrics_row(test_warmup, "click")
+        val_purchase_w = _metrics_row(val_warmup, "purchase")
+        test_purchase_w = _metrics_row(test_warmup, "purchase")
+        val_overall_w = _overall_row(val_warmup)
+        test_overall_w = _overall_row(test_warmup)
+
+        click_row_w = {}
+        purchase_row_w = {}
+        for k in val_warmup["topk"]:
+            click_row_w[f"val/hr@{k}"] = float(val_click_w.get(f"hr@{k}", 0.0))
+            click_row_w[f"test/hr@{k}"] = float(test_click_w.get(f"hr@{k}", 0.0))
+            click_row_w[f"val/ndcg@{k}"] = float(val_click_w.get(f"ndcg@{k}", 0.0))
+            click_row_w[f"test/ndcg@{k}"] = float(test_click_w.get(f"ndcg@{k}", 0.0))
+
+            purchase_row_w[f"val/hr@{k}"] = float(val_purchase_w.get(f"hr@{k}", 0.0))
+            purchase_row_w[f"test/hr@{k}"] = float(test_purchase_w.get(f"hr@{k}", 0.0))
+            purchase_row_w[f"val/ndcg@{k}"] = float(val_purchase_w.get(f"ndcg@{k}", 0.0))
+            purchase_row_w[f"test/ndcg@{k}"] = float(test_purchase_w.get(f"ndcg@{k}", 0.0))
+
+        overall_row_w = {}
+        for k in val_warmup["topk"]:
+            overall_row_w[f"val/ndcg@{k}"] = float(val_overall_w.get(f"ndcg@{k}", 0.0))
+            overall_row_w[f"test/ndcg@{k}"] = float(test_overall_w.get(f"ndcg@{k}", 0.0))
+
+        if not smoke_cpu:
+            df_clicks_w = pd.DataFrame([click_row_w], index=["metrics"]).loc[:, col_order]
+            df_purchase_w = pd.DataFrame([purchase_row_w], index=["metrics"]).loc[:, col_order]
+            df_clicks_w.to_csv(run_dir / "results_clicks_warmup.csv", index=False)
+            df_purchase_w.to_csv(run_dir / "results_purchase_warmup.csv", index=False)
+
+            df_overall_w = pd.DataFrame([overall_row_w], index=["metrics"]).loc[:, overall_col_order]
+            df_overall_w.to_csv(run_dir / "results_warmup.csv", index=False)
+
+            with open(run_dir / "summary@10_warmup.txt", "w") as f:
+                f.write(_summary_at_k_text(val_warmup, test_warmup, k=10))
+
     if not smoke_cpu:
         df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
         df_overall.to_csv(run_dir / "results.csv", index=False)
 
         with open(run_dir / "summary@10.txt", "w") as f:
-            f.write(_summary_at_k_text(val_best, test_best, k=10))
+            if use_auto_warmup and (val_warmup is not None) and (test_warmup is not None):
+                f.write(_summary_at_k_text_with_delta(val_best, test_best, val_warmup, test_warmup, k=10))
+            else:
+                f.write(_summary_at_k_text(val_best, test_best, k=10))
 
 
 if __name__ == "__main__":
