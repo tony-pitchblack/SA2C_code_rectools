@@ -193,7 +193,7 @@ def _sample_negative_actions(min_id: int, max_id_exclusive: int, actions, neg, d
 
 
 @torch.no_grad()
-def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_backbone: bool = False):
+def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_backbone: bool = False, epoch=None):
     total_clicks = 0.0
     total_purchase = 0.0
     topk = [5, 10, 15, 20]
@@ -259,7 +259,9 @@ def evaluate(model, val_loader, reward_click, device, debug=False, use_rectools_
         overall[f"ndcg@{k}"] = float((ndcg_clicks[i] + ndcg_purchase[i]) / denom_all) if denom_all > 0 else 0.0
 
     logger = logging.getLogger(__name__)
+    prefix = f"epoch {epoch} " if epoch is not None else ""
     logger.info("#############################################################")
+    logger.info("%sval metrics", prefix)
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -738,7 +740,13 @@ def main():
                 opt2.step()
                 total_step += 1
         val_metrics = evaluate(
-            qn1, val_dl, reward_click, device, debug=bool(cfg.get("debug", False)), use_rectools_backbone=use_rectools_backbone
+            qn1,
+            val_dl,
+            reward_click,
+            device,
+            debug=bool(cfg.get("debug", False)),
+            use_rectools_backbone=use_rectools_backbone,
+            epoch=int(epoch_idx + 1),
         )
         metric = float(val_metrics["overall"].get("ndcg@10", 0.0))
         if metric > best_metric:
