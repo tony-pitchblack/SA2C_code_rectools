@@ -389,14 +389,15 @@ def _make_step_batch_from_sessions(
 
     idx_state = torch.where(t_col < s, idx1, (t_col - s) + idx1)  # [L,S]
     idx_state_b = idx_state.unsqueeze(0).expand(bsz, lmax, s)
-    state_all = items_pad.gather(1, idx_state_b)
+    items_pad_3 = items_pad.unsqueeze(2).expand(bsz, lmax, s)
+    state_all = items_pad_3.gather(1, idx_state_b)
     invalid_state = (t_col < s) & (idx1 >= t_col)
     state_all = state_all.masked_fill(invalid_state.unsqueeze(0).expand(bsz, lmax, s), int(pad_item))
 
     tnext_col = (t + 1).unsqueeze(1)
     idx_next = torch.where(tnext_col < s, idx1, (tnext_col - s) + idx1)
     idx_next_b = idx_next.unsqueeze(0).expand(bsz, lmax, s)
-    next_state_all = items_pad.gather(1, idx_next_b)
+    next_state_all = items_pad_3.gather(1, idx_next_b)
     invalid_next = (tnext_col < s) & (idx1 >= tnext_col)
     next_state_all = next_state_all.masked_fill(invalid_next.unsqueeze(0).expand(bsz, lmax, s), int(pad_item))
 
