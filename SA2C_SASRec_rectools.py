@@ -1040,6 +1040,13 @@ def main():
                         break
 
             else:
+                # Scheduled warmup: if warmup_epochs > 0, persist best checkpoint from stage-1 warmup
+                if (not use_auto_warmup) and (phase == "scheduled") and (not entered_finetune) and float(cfg.get("warmup_epochs", 0.0)) > 0.0:
+                    if metric > best_metric_warmup:
+                        best_metric_warmup = metric
+                        torch.save(best_state_for_epoch, best_warmup_path)
+                        logger.info("best_warmup_model.pt updated (val ndcg@10=%f)", float(best_metric_warmup))
+
                 if entered_finetune:
                     if (not warmup_baseline_finalized) and np.isfinite(metric):
                         warmup_best_metric_scalar = float(metric)
@@ -1377,10 +1384,7 @@ def main():
         df_overall.to_csv(run_dir / "results.csv", index=False)
 
         with open(run_dir / "summary@10.txt", "w") as f:
-            if use_auto_warmup and (val_warmup is not None) and (test_warmup is not None):
-                f.write(_summary_at_k_text_with_delta(val_best, test_best, val_warmup, test_warmup, k=10))
-            else:
-                f.write(_summary_at_k_text(val_best, test_best, k=10))
+            f.write(_summary_at_k_text(val_best, test_best, k=10))
 
 
 if __name__ == "__main__":
