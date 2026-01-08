@@ -3,12 +3,16 @@ SA2C_code_unzip_dir=/raid/data_share/antonchernov/transformer_benchmark_rl/data/
 rsync -a "${SA2C_code_unzip_dir}/Kaggle/data/" "Kaggle/data/"
 rsync -a "${SA2C_code_unzip_dir}/RC15/data/" "RC15/data/"
 
-## Run Torch (uv + local .venv) — SASRec only
-conda activate sa2c_code_torch
+## Run Torch (local .venv + uv) — SASRec only
+
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
 
 ## retailrocket
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/baseline.yml
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/baseline.yml --smoke-cpu
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/default.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/default_sampled_loss.yml
@@ -19,7 +23,9 @@ python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/b
 
 ## yoochoose
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/baseline.yml
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only.yml
+python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/baseline.yml --smoke-cpu
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/default.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/default_sampled_loss.yml

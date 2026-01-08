@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, RandomSampler
 
-from SASRecModules_torch import SASRecQNetworkTorch
+from SASRecModules_torch import SASRecBaselineTorch, SASRecQNetworkTorch
 import yaml
 
 try:
@@ -38,6 +38,7 @@ def parse_args():
 
 def _default_config():
     return {
+        "enable_sa2c": True,
         "seed": 0,
         "epoch": 50,
         "dataset": "retailrocket",
@@ -255,7 +256,13 @@ def evaluate(
         reward_t = torch.where(is_buy_t == 1, float(reward_buy), float(reward_click)).to(torch.float32)
         action_t = action_t.to(device, non_blocking=True)
         reward_t = reward_t.to(device, non_blocking=True)
-        _, ce_logits = model(state_t, len_state_t)
+        out = model(state_t, len_state_t)
+        if isinstance(out, (tuple, list)):
+            if len(out) != 2:
+                raise ValueError(f"Expected model output (q_values, ce_logits), got tuple/list of len={len(out)}")
+            ce_logits = out[1]
+        else:
+            ce_logits = out
         if debug and (not torch.isfinite(ce_logits).all()):
             raise FloatingPointError("Non-finite ce_logits during evaluation")
         kmax = int(max(topk))
@@ -558,6 +565,7 @@ def main():
     reward_buy = float(cfg.get("r_buy", 1.0))
     reward_negative = float(cfg.get("r_negative", -0.0))
     purchase_only = bool(cfg.get("purchase_only", False))
+    enable_sa2c = bool(cfg.get("enable_sa2c", True))
 
     if not smoke_cpu:
         train_batch_size = int(cfg.get("batch_size_train", 256))
@@ -568,27 +576,37 @@ def main():
     with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
         pop_dict = eval(f.read())
 
-    qn1 = SASRecQNetworkTorch(
-        item_num=item_num,
-        state_size=state_size,
-        hidden_size=int(cfg.get("hidden_factor", 64)),
-        num_heads=int(cfg.get("num_heads", 1)),
-        num_blocks=int(cfg.get("num_blocks", 1)),
-        dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-    ).to(device)
-    qn2 = SASRecQNetworkTorch(
-        item_num=item_num,
-        state_size=state_size,
-        hidden_size=int(cfg.get("hidden_factor", 64)),
-        num_heads=int(cfg.get("num_heads", 1)),
-        num_blocks=int(cfg.get("num_blocks", 1)),
-        dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-    ).to(device)
-
-    opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
-    opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+    if enable_sa2c:
+        qn1 = SASRecQNetworkTorch(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        qn2 = SASRecQNetworkTorch(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+        opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+    else:
+        model = SASRecBaselineTorch(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=float(cfg.get("lr", 0.005)))
 
     total_step = 0
     pin_memory = True
@@ -641,12 +659,13 @@ def main():
     )
     test_dl_s = time.perf_counter() - t0
 
-    behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
-    for k, v in pop_dict.items():
-        kk = int(k)
-        if 0 <= kk <= item_num:
-            behavior_prob_table[kk] = float(v)
-    behavior_prob_table = behavior_prob_table.to(device)
+    if enable_sa2c:
+        behavior_prob_table = torch.full((item_num + 1,), 1.0, dtype=torch.float32)
+        for k, v in pop_dict.items():
+            kk = int(k)
+            if 0 <= kk <= item_num:
+                behavior_prob_table[kk] = float(v)
+        behavior_prob_table = behavior_prob_table.to(device)
 
     early_patience = int(cfg.get("early_stopping_ep", 5))
     best_metric = float("-inf")
@@ -713,100 +732,116 @@ def main():
                 continue
             state = step["state"]
             len_state = step["len_state"]
-            next_state = step["next_state"]
-            len_next_state = step["len_next_state"]
             action = step["action"]
-            is_buy = step["is_buy"]
-            is_done = step["done"]
             step_count = int(action.shape[0])
-            discount = torch.full((step_count,), float(cfg.get("discount", 0.5)), dtype=torch.float32)
-
-            pointer = np.random.randint(0, 2)
-            if pointer == 0:
-                main_qn, target_qn = qn1, qn2
-                opt1, opt2 = opt1_qn1, opt2_qn1
-            else:
-                main_qn, target_qn = qn2, qn1
-                opt1, opt2 = opt1_qn2, opt2_qn2
-
-            main_qn.train()
-            target_qn.train()
 
             state_t = state.to(device, non_blocking=pin_memory)
             len_state_t = len_state.to(device, non_blocking=pin_memory)
-            next_state_t = next_state.to(device, non_blocking=pin_memory)
-            len_next_state_t = len_next_state.to(device, non_blocking=pin_memory)
             action_t = action.to(device, non_blocking=pin_memory).to(torch.long)
-            discount_t = discount.to(device, non_blocking=pin_memory)
-            done_t = is_done.to(device, non_blocking=pin_memory).to(torch.float32)
 
-            neg_actions_t = _sample_negative_actions(0, item_num, action_t, int(cfg.get("neg", 10)), device=device)
+            if enable_sa2c:
+                next_state = step["next_state"]
+                len_next_state = step["len_next_state"]
+                is_buy = step["is_buy"]
+                is_done = step["done"]
+                discount = torch.full((step_count,), float(cfg.get("discount", 0.5)), dtype=torch.float32)
 
-            with torch.no_grad():
-                q_next_target, _ = target_qn(next_state_t, len_next_state_t)
-                q_next_selector, _ = main_qn(next_state_t, len_next_state_t)
-                q_curr_target, _ = target_qn(state_t, len_state_t)
+                pointer = np.random.randint(0, 2)
+                if pointer == 0:
+                    main_qn, target_qn = qn1, qn2
+                    opt1, opt2 = opt1_qn1, opt2_qn1
+                else:
+                    main_qn, target_qn = qn2, qn1
+                    opt1, opt2 = opt1_qn2, opt2_qn2
 
-            q_values, ce_logits = main_qn(state_t, len_state_t)
-            if bool(cfg.get("debug", False)):
-                if not torch.isfinite(q_values).all():
-                    raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
-                if not torch.isfinite(ce_logits).all():
+                main_qn.train()
+                target_qn.train()
+
+                next_state_t = next_state.to(device, non_blocking=pin_memory)
+                len_next_state_t = len_next_state.to(device, non_blocking=pin_memory)
+                discount_t = discount.to(device, non_blocking=pin_memory)
+                done_t = is_done.to(device, non_blocking=pin_memory).to(torch.float32)
+
+                neg_actions_t = _sample_negative_actions(0, item_num, action_t, int(cfg.get("neg", 10)), device=device)
+
+                with torch.no_grad():
+                    q_next_target, _ = target_qn(next_state_t, len_next_state_t)
+                    q_next_selector, _ = main_qn(next_state_t, len_next_state_t)
+                    q_curr_target, _ = target_qn(state_t, len_state_t)
+
+                q_values, ce_logits = main_qn(state_t, len_state_t)
+                if bool(cfg.get("debug", False)):
+                    if not torch.isfinite(q_values).all():
+                        raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
+                    if not torch.isfinite(ce_logits).all():
+                        raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
+
+                if reward_fn == "ndcg":
+                    with torch.no_grad():
+                        reward_t = _ndcg_reward_from_logits(ce_logits.detach(), action_t)
+                else:
+                    reward_t = torch.where(is_buy == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+                    reward_t = reward_t.to(device, non_blocking=pin_memory)
+
+                a_star = q_next_selector.argmax(dim=1)
+                q_tp1 = q_next_target.gather(1, a_star[:, None]).squeeze(1)
+                target_pos = reward_t + discount_t * q_tp1 * (1.0 - done_t)
+                q_sa = q_values.gather(1, action_t[:, None]).squeeze(1)
+                qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
+
+                a_star_curr = q_values.detach().argmax(dim=1)
+                q_t_star = q_curr_target.gather(1, a_star_curr[:, None]).squeeze(1)
+                target_neg = reward_negative + discount_t * q_t_star
+                q_sneg = q_values.gather(1, neg_actions_t)
+                qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
+
+                ce_loss_pre = F.cross_entropy(ce_logits, action_t, reduction="none")
+
+                if total_step < 15000:
+                    loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
+                    if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
+                        raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
+                    opt1.zero_grad(set_to_none=True)
+                    loss.backward()
+                    opt1.step()
+                    total_step += int(step_count)
+                else:
+                    with torch.no_grad():
+                        prob = F.softmax(ce_logits, dim=1).gather(1, action_t[:, None]).squeeze(1)
+                    behavior_prob = behavior_prob_table[action_t]
+                    ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
+
+                    with torch.no_grad():
+                        q_pos_det = q_values.gather(1, action_t[:, None]).squeeze(1)
+                        q_neg_det = q_values.gather(1, neg_actions_t).sum(dim=1)
+                        q_avg = (q_pos_det + q_neg_det) / float(1 + int(cfg.get("neg", 10)))
+                        advantage = q_pos_det - q_avg
+                        if float(cfg.get("clip", 0.0)) > 0:
+                            advantage = advantage.clamp(-float(cfg.get("clip", 0.0)), float(cfg.get("clip", 0.0)))
+
+                    ce_loss_post = ips * ce_loss_pre * advantage
+                    loss = float(cfg.get("weight", 1.0)) * (qloss_pos + qloss_neg) + ce_loss_post.mean()
+                    if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
+                        raise FloatingPointError(f"Non-finite loss (phase2) at total_step={int(total_step)}")
+                    opt2.zero_grad(set_to_none=True)
+                    loss.backward()
+                    opt2.step()
+                    total_step += int(step_count)
+            else:
+                model.train()
+                ce_logits = model(state_t, len_state_t)
+                if bool(cfg.get("debug", False)) and (not torch.isfinite(ce_logits).all()):
                     raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
-
-            if reward_fn == "ndcg":
-                with torch.no_grad():
-                    reward_t = _ndcg_reward_from_logits(ce_logits.detach(), action_t)
-            else:
-                reward_t = torch.where(is_buy == 1, float(reward_buy), float(reward_click)).to(torch.float32)
-                reward_t = reward_t.to(device, non_blocking=pin_memory)
-
-            a_star = q_next_selector.argmax(dim=1)
-            q_tp1 = q_next_target.gather(1, a_star[:, None]).squeeze(1)
-            target_pos = reward_t + discount_t * q_tp1 * (1.0 - done_t)
-            q_sa = q_values.gather(1, action_t[:, None]).squeeze(1)
-            qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
-
-            a_star_curr = q_values.detach().argmax(dim=1)
-            q_t_star = q_curr_target.gather(1, a_star_curr[:, None]).squeeze(1)
-            target_neg = reward_negative + discount_t * q_t_star
-            q_sneg = q_values.gather(1, neg_actions_t)
-            qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
-
-            ce_loss_pre = F.cross_entropy(ce_logits, action_t, reduction="none")
-
-            if total_step < 15000:
-                loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
+                loss = F.cross_entropy(ce_logits, action_t)
                 if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
-                    raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
-                opt1.zero_grad(set_to_none=True)
+                    raise FloatingPointError(f"Non-finite loss at total_step={int(total_step)}")
+                opt.zero_grad(set_to_none=True)
                 loss.backward()
-                opt1.step()
+                opt.step()
                 total_step += int(step_count)
-            else:
-                with torch.no_grad():
-                    prob = F.softmax(ce_logits, dim=1).gather(1, action_t[:, None]).squeeze(1)
-                behavior_prob = behavior_prob_table[action_t]
-                ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
 
-                with torch.no_grad():
-                    q_pos_det = q_values.gather(1, action_t[:, None]).squeeze(1)
-                    q_neg_det = q_values.gather(1, neg_actions_t).sum(dim=1)
-                    q_avg = (q_pos_det + q_neg_det) / float(1 + int(cfg.get("neg", 10)))
-                    advantage = q_pos_det - q_avg
-                    if float(cfg.get("clip", 0.0)) > 0:
-                        advantage = advantage.clamp(-float(cfg.get("clip", 0.0)), float(cfg.get("clip", 0.0)))
-
-                ce_loss_post = ips * ce_loss_pre * advantage
-                loss = float(cfg.get("weight", 1.0)) * (qloss_pos + qloss_neg) + ce_loss_post.mean()
-                if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
-                    raise FloatingPointError(f"Non-finite loss (phase2) at total_step={int(total_step)}")
-                opt2.zero_grad(set_to_none=True)
-                loss.backward()
-                opt2.step()
-                total_step += int(step_count)
         val_metrics = evaluate(
-            qn1,
+            qn1 if enable_sa2c else model,
             val_dl,
             reward_click,
             reward_buy,
@@ -823,7 +858,7 @@ def main():
         if metric > best_metric:
             best_metric = metric
             epochs_since_improve = 0
-            torch.save(qn1.state_dict(), run_dir / "best_model.pt")
+            torch.save((qn1 if enable_sa2c else model).state_dict(), run_dir / "best_model.pt")
             logger.info("best_model.pt updated (val ndcg@10=%f)", float(best_metric))
         else:
             epochs_since_improve += 1
@@ -843,9 +878,9 @@ def main():
 
     best_path = run_dir / "best_model.pt"
     if not best_path.exists():
-        torch.save(qn1.state_dict(), best_path)
+        torch.save((qn1 if enable_sa2c else model).state_dict(), best_path)
 
-    best_model = SASRecQNetworkTorch(
+    best_model = (SASRecQNetworkTorch if enable_sa2c else SASRecBaselineTorch)(
         item_num=item_num,
         state_size=state_size,
         hidden_size=int(cfg.get("hidden_factor", 64)),
