@@ -1,7 +1,10 @@
 import argparse
 import logging
 import os
+import pickle
 import random
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -115,6 +118,237 @@ def _resolve_dataset_root(dataset: str):
     if dataset == "retailrocket":
         return repo_root / "Kaggle"
     raise ValueError("dataset must be one of: yoochoose | retailrocket")
+
+
+def _is_persrec_tc5_dataset_cfg(dataset_cfg) -> bool:
+    return isinstance(dataset_cfg, dict) and ("calc_date" in dataset_cfg)
+
+
+def _hdfs_get(src: str, dst: str):
+    logger = logging.getLogger(__name__)
+    candidates = []
+    if shutil.which("hdfs") is not None:
+        candidates.append(["hdfs", "dfs", "-get", src, dst])
+    if shutil.which("hadoop") is not None:
+        candidates.append(["hadoop", "fs", "-get", src, dst])
+    if not candidates:
+        raise RuntimeError("Neither 'hdfs' nor 'hadoop' was found in PATH; cannot download dataset from HDFS.")
+    last_err = None
+    for cmd in candidates:
+        try:
+            logger.info("persrec_tc5: hdfs_get using `%s` (%s -> %s)", " ".join(cmd[:2]), str(src), str(dst))
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            return
+        except subprocess.CalledProcessError as e:
+            last_err = e
+            out = (e.stdout or "").strip()
+            if out:
+                logger.warning("HDFS download failed with %s: %s", " ".join(cmd[:2]), out.splitlines()[-1])
+            continue
+    raise RuntimeError(f"Failed to download dataset from HDFS. Last error: {last_err}") from last_err
+
+
+def _ensure_local_parquet_cache(*, hdfs_working_prefix: str, local_parquet_dir: Path):
+    logger = logging.getLogger(__name__)
+    local_parquet_dir = Path(local_parquet_dir)
+    if local_parquet_dir.exists() and any(local_parquet_dir.iterdir()):
+        logger.info("persrec_tc5: parquet cache found at %s", str(local_parquet_dir))
+        return
+    local_parquet_dir.parent.mkdir(parents=True, exist_ok=True)
+    src = str(Path(hdfs_working_prefix) / "training" / "dataset_train.parquet")
+    dst = str(local_parquet_dir)
+    t0 = time.perf_counter()
+    logger.info("persrec_tc5: parquet cache missing -> downloading to %s", str(local_parquet_dir))
+    _hdfs_get(src, dst)
+    logger.info("persrec_tc5: hdfs download done in %.3fs", float(time.perf_counter() - t0))
+    if not local_parquet_dir.exists():
+        raise RuntimeError(f"HDFS download completed but local path does not exist: {str(local_parquet_dir)}")
+
+
+def _load_persrec_tc5_parquet(local_parquet_dir: Path, *, use_sanity_subset: bool) -> pd.DataFrame:
+    logger = logging.getLogger(__name__)
+    local_parquet_dir = Path(local_parquet_dir)
+    if not local_parquet_dir.exists():
+        raise FileNotFoundError(f"Missing parquet directory: {str(local_parquet_dir)}")
+    if not bool(use_sanity_subset):
+        t0 = time.perf_counter()
+        logger.info("persrec_tc5: loading parquet dataset (all parts) from %s", str(local_parquet_dir))
+        df = pd.read_parquet(str(local_parquet_dir))
+        logger.info("persrec_tc5: parquet loaded rows=%d in %.3fs", int(len(df)), float(time.perf_counter() - t0))
+        return df
+    files = sorted([p for p in local_parquet_dir.iterdir() if p.is_file() and p.suffix == ".parquet"], key=lambda p: p.name)
+    if not files:
+        raise FileNotFoundError(f"Sanity subset requested, but no parquet part files found in: {str(local_parquet_dir)}")
+    t0 = time.perf_counter()
+    logger.info("persrec_tc5: sanity subset -> loading parquet part %s", str(files[0]))
+    df = pd.read_parquet(str(files[0]))
+    logger.info("persrec_tc5: parquet loaded rows=%d in %.3fs", int(len(df)), float(time.perf_counter() - t0))
+    return df
+
+
+def _load_vocab_any(path: Path, *, is_sanity: bool) -> dict[int, int]:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    if bool(is_sanity):
+        z = np.load(str(path))
+        raw_ids = z["raw_ids"]
+        return {int(raw): int(i) for i, raw in enumerate(raw_ids.tolist())}
+    with open(path, "rb") as f:
+        obj = pickle.load(f)
+    if not isinstance(obj, dict):
+        raise ValueError(f"Expected dict in vocab file, got {type(obj)}")
+    return {int(k): int(v) for k, v in obj.items()}
+
+
+def _save_vocab_any(path: Path, item2id: dict[int, int], *, is_sanity: bool):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if bool(is_sanity):
+        raw_ids = np.empty((len(item2id),), dtype=np.int64)
+        for raw, idx in item2id.items():
+            raw_ids[int(idx)] = int(raw)
+        np.savez(str(path), raw_ids=raw_ids)
+        return
+    with open(path, "wb") as f:
+        pickle.dump(item2id, f)
+
+
+def _load_or_build_item_vocab_and_sequences(
+    df: pd.DataFrame,
+    *,
+    product_column: str,
+    vocab_path: Path,
+    use_sanity_subset: bool,
+) -> tuple[list[list[int]], dict[int, int], np.ndarray]:
+    logger = logging.getLogger(__name__)
+    is_sanity = bool(use_sanity_subset)
+    t0 = time.perf_counter()
+    if Path(vocab_path).exists():
+        logger.info("persrec_tc5: loading vocab from %s", str(vocab_path))
+        item2id = _load_vocab_any(vocab_path, is_sanity=is_sanity)
+        counts = np.zeros((len(item2id),), dtype=np.int64)
+        seqs = []
+        for seq in tqdm(df[product_column].tolist(), desc="persrec_tc5 remap", unit="row", dynamic_ncols=True, leave=False):
+            if seq is None:
+                seqs.append([])
+                continue
+            remapped = []
+            for x in list(seq):
+                raw = int(x)
+                if raw not in item2id:
+                    raise ValueError(f"Unknown product_id={raw} not in existing vocabulary {str(vocab_path)}")
+                idx = int(item2id[raw])
+                remapped.append(idx)
+                counts[idx] += 1
+            seqs.append(remapped)
+        logger.info(
+            "persrec_tc5: remapped sequences rows=%d vocab=%d in %.3fs",
+            int(len(seqs)),
+            int(len(item2id)),
+            float(time.perf_counter() - t0),
+        )
+        return seqs, item2id, counts
+
+    logger.info("persrec_tc5: building vocab at %s", str(vocab_path))
+    item2id: dict[int, int] = {}
+    counts_list: list[int] = []
+    seqs = []
+    for seq in tqdm(df[product_column].tolist(), desc="persrec_tc5 vocab", unit="row", dynamic_ncols=True, leave=False):
+        if seq is None:
+            seqs.append([])
+            continue
+        remapped = []
+        for x in list(seq):
+            raw = int(x)
+            idx = item2id.get(raw)
+            if idx is None:
+                idx = int(len(item2id))
+                item2id[raw] = idx
+                counts_list.append(0)
+            remapped.append(idx)
+            counts_list[idx] += 1
+        seqs.append(remapped)
+    counts = np.asarray(counts_list, dtype=np.int64)
+    _save_vocab_any(vocab_path, item2id, is_sanity=is_sanity)
+    logger.info(
+        "persrec_tc5: built vocab rows=%d vocab=%d in %.3fs",
+        int(len(seqs)),
+        int(len(item2id)),
+        float(time.perf_counter() - t0),
+    )
+    return seqs, item2id, counts
+
+
+def _load_or_build_row_splits(*, n_rows: int, splits_path: Path, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    logger = logging.getLogger(__name__)
+    splits_path = Path(splits_path)
+    if splits_path.exists():
+        logger.info("persrec_tc5: loading splits from %s", str(splits_path))
+        z = np.load(str(splits_path))
+        return z["train_idx"], z["val_idx"], z["test_idx"]
+    logger.info("persrec_tc5: creating splits (80/10/10) at %s", str(splits_path))
+    rng = np.random.RandomState(int(seed))
+    perm = rng.permutation(int(n_rows))
+    n_train = int(0.8 * n_rows)
+    n_val = int(0.1 * n_rows)
+    train_idx = perm[:n_train]
+    val_idx = perm[n_train : n_train + n_val]
+    test_idx = perm[n_train + n_val :]
+    splits_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(str(splits_path), train_idx=train_idx, val_idx=val_idx, test_idx=test_idx)
+    logger.info(
+        "persrec_tc5: splits sizes train=%d val=%d test=%d",
+        int(train_idx.shape[0]),
+        int(val_idx.shape[0]),
+        int(test_idx.shape[0]),
+    )
+    return train_idx, val_idx, test_idx
+
+
+def _ensure_data_statis(path: Path, *, state_size: int, item_num: int):
+    logger = logging.getLogger(__name__)
+    path = Path(path)
+    if path.exists():
+        logger.info("persrec_tc5: data_statis exists at %s", str(path))
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame({"state_size": [int(state_size)], "item_num": [int(item_num)]})
+    df.to_pickle(str(path))
+    logger.info("persrec_tc5: wrote data_statis to %s", str(path))
+
+
+def _ensure_pop_dict(path: Path, *, counts: np.ndarray):
+    logger = logging.getLogger(__name__)
+    path = Path(path)
+    if path.exists():
+        logger.info("persrec_tc5: pop_dict exists at %s", str(path))
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    total = float(np.asarray(counts, dtype=np.float64).sum())
+    if total <= 0:
+        pop = {int(i): 0.0 for i in range(int(counts.shape[0]))}
+    else:
+        pop = {int(i): float(c / total) for i, c in enumerate(counts.tolist())}
+    with open(path, "w") as f:
+        f.write(str(pop))
+    logger.info("persrec_tc5: wrote pop_dict to %s", str(path))
+
+
+class _PersrecTC5UserSeqDataset(Dataset):
+    def __init__(self, sequences: list[list[int]], indices: np.ndarray):
+        super().__init__()
+        self.sequences = sequences
+        self.indices = np.asarray(indices, dtype=np.int64)
+
+    def __len__(self):
+        return int(self.indices.shape[0])
+
+    def __getitem__(self, idx: int):
+        seq = self.sequences[int(self.indices[int(idx)])]
+        items = torch.as_tensor(seq, dtype=torch.long)
+        is_buy = torch.ones((int(items.numel()),), dtype=torch.long)
+        return items, is_buy
 
 
 def _configure_logging(run_dir: Path, debug: bool):
@@ -523,8 +757,15 @@ def main():
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
     enable_sa2c = bool(cfg.get("enable_sa2c", True))
 
-    dataset_name = str(cfg.get("dataset", "retailrocket"))
-    dataset_root = _resolve_dataset_root(dataset_name)
+    dataset_cfg = cfg.get("dataset", "retailrocket")
+    persrec_tc5 = _is_persrec_tc5_dataset_cfg(dataset_cfg)
+    if persrec_tc5:
+        calc_date = str(dataset_cfg.get("calc_date"))
+        dataset_name = f"persrec_tc5_{calc_date}"
+        dataset_root = Path(__file__).resolve().parent
+    else:
+        dataset_name = str(dataset_cfg)
+        dataset_root = _resolve_dataset_root(dataset_name)
     config_name = Path(config_path).stem
     run_dir = _make_run_dir(dataset_name, config_name)
     _configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
@@ -564,8 +805,55 @@ def main():
         torch.backends.cuda.enable_math_sdp(True)
 
     data_rel = str(cfg.get("data", "data"))
-    data_directory = str(dataset_root / data_rel)
-    data_statis = pd.read_pickle(os.path.join(data_directory, "data_statis.df"))
+    if persrec_tc5:
+        use_sanity_subset = bool(dataset_cfg.get("use_sanity_subset", False))
+        user_column = str(dataset_cfg.get("user_column", "loyalty_cardholder_rk"))
+        product_column = str(dataset_cfg.get("product_column", "product_id"))
+        state_size_cfg = int(dataset_cfg.get("state_size", 50))
+        base_dir = Path(dataset_root) / data_rel / dataset_name
+        logger.info("persrec_tc5: data_dir=%s sanity=%s", str(base_dir), str(bool(use_sanity_subset)))
+        local_parquet_dir = base_dir / "dataset_train.parquet"
+        _ensure_local_parquet_cache(
+            hdfs_working_prefix=str(dataset_cfg.get("hdfs_working_prefix")),
+            local_parquet_dir=local_parquet_dir,
+        )
+        df = _load_persrec_tc5_parquet(local_parquet_dir, use_sanity_subset=use_sanity_subset)
+        logger.info("persrec_tc5: parquet columns=%s", ",".join([str(c) for c in df.columns.tolist()]))
+        if user_column not in df.columns:
+            raise KeyError(f"Missing user column '{user_column}' in parquet dataset")
+        if product_column not in df.columns:
+            raise KeyError(f"Missing product column '{product_column}' in parquet dataset")
+        vocab_path = base_dir / ("built_vocabulary_sanity.npz" if use_sanity_subset else "built_vocabulary.pkl")
+        splits_path = base_dir / ("data_splits_sanity.npz" if use_sanity_subset else "data_splits.npz")
+        data_statis_path = base_dir / ("data_statis_sanity.df" if use_sanity_subset else "data_statis.df")
+        pop_dict_path = base_dir / ("pop_dict_sanity.txt" if use_sanity_subset else "pop_dict.txt")
+
+        seqs, item2id, counts = _load_or_build_item_vocab_and_sequences(
+            df, product_column=product_column, vocab_path=vocab_path, use_sanity_subset=use_sanity_subset
+        )
+        item_num_local = int(len(item2id))
+        logger.info("persrec_tc5: item_num=%d", int(item_num_local))
+        _ensure_data_statis(data_statis_path, state_size=int(state_size_cfg), item_num=int(item_num_local))
+        _ensure_pop_dict(pop_dict_path, counts=counts)
+        train_idx, val_idx, test_idx = _load_or_build_row_splits(
+            n_rows=int(len(seqs)), splits_path=splits_path, seed=int(cfg.get("seed", 0))
+        )
+
+        data_directory = str(base_dir)
+        t0 = time.perf_counter()
+        train_ds = _PersrecTC5UserSeqDataset(seqs, train_idx)
+        val_ds = _PersrecTC5UserSeqDataset(seqs, val_idx)
+        test_ds = _PersrecTC5UserSeqDataset(seqs, test_idx)
+        logger.info("persrec_tc5: dataset objects ready in %.3fs", float(time.perf_counter() - t0))
+    else:
+        data_directory = str(dataset_root / data_rel)
+        data_statis_path = Path(data_directory) / "data_statis.df"
+        pop_dict_path = Path(data_directory) / "pop_dict.txt"
+        train_ds = None
+        val_ds = None
+        test_ds = None
+
+    data_statis = pd.read_pickle(str(data_statis_path))
     state_size = int(data_statis["state_size"][0])
     item_num = int(data_statis["item_num"][0])
     if bool(cfg.get("debug", False)):
@@ -590,9 +878,12 @@ def main():
 
     pin_memory = True
 
-    t0 = time.perf_counter()
-    train_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_train.df")
-    train_ds_s = time.perf_counter() - t0
+    if not persrec_tc5:
+        t0 = time.perf_counter()
+        train_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_train.df")
+        train_ds_s = time.perf_counter() - t0
+    else:
+        train_ds_s = 0.0
     num_sessions = int(len(train_ds))
     num_batches = int(num_sessions / train_batch_size)
     if num_batches <= 0:
@@ -603,9 +894,12 @@ def main():
             int(train_batch_size),
         )
 
-    t0 = time.perf_counter()
-    val_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_val.df")
-    val_ds_s = time.perf_counter() - t0
+    if not persrec_tc5:
+        t0 = time.perf_counter()
+        val_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_val.df")
+        val_ds_s = time.perf_counter() - t0
+    else:
+        val_ds_s = 0.0
     t0 = time.perf_counter()
     val_dl = _make_session_loader(
         val_ds,
@@ -617,9 +911,12 @@ def main():
     )
     val_dl_s = time.perf_counter() - t0
 
-    t0 = time.perf_counter()
-    test_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_test.df")
-    test_ds_s = time.perf_counter() - t0
+    if not persrec_tc5:
+        t0 = time.perf_counter()
+        test_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_test.df")
+        test_ds_s = time.perf_counter() - t0
+    else:
+        test_ds_s = 0.0
     t0 = time.perf_counter()
     test_dl = _make_session_loader(
         test_ds,
@@ -632,7 +929,7 @@ def main():
     test_dl_s = time.perf_counter() - t0
 
     if enable_sa2c:
-        with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
+        with open(str(pop_dict_path), "r") as f:
             pop_dict = eval(f.read())
 
         qn1 = SASRecQNetworkRectools(
@@ -1064,29 +1361,18 @@ def main():
                             epochs_since_improve_phase2 = 0
                         else:
                             epochs_since_improve_phase2 += 1
-                        logger.info(
-                            "finetune no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
-                            float(metric),
-                            float(best_metric_phase2),
-                            int(epochs_since_improve_phase2),
-                            int(early_patience),
-                        )
-                        if early_patience > 0 and epochs_since_improve_phase2 >= early_patience:
-                            logger.info("finetune early stopping triggered")
-                            break
+                            logger.info(
+                                "finetune no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
+                                float(metric),
+                                float(best_metric_phase2),
+                                int(epochs_since_improve_phase2),
+                                int(early_patience),
+                            )
+                            if early_patience > 0 and epochs_since_improve_phase2 >= early_patience:
+                                logger.info("finetune early stopping triggered")
+                                break
                 else:
                     warmup_best_metric_scalar = float(max(warmup_best_metric_scalar, metric))
-
-                logger.info(
-                    "no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
-                    float(metric),
-                    float(best_metric),
-                    int(epochs_since_improve),
-                    int(early_patience),
-                )
-                if early_patience > 0 and epochs_since_improve >= early_patience:
-                    logger.info("early stopping triggered")
-                    break
             if stop_training:
                 logger.info("max_steps reached; stopping")
                 break

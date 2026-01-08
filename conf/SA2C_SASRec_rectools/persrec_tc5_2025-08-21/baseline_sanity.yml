@@ -1,14 +1,20 @@
 seed: 0
-dataset: retailrocket
+dataset:
+  calc_date: "2025-08-21"
+  hdfs_working_prefix: "hdfs:///user/antonchernov/bert4recv1/tc5/"
+  user_column: loyalty_cardholder_rk
+  product_column: product_id
+  state_size: 50
+  use_sanity_subset: true
 data: data
-epoch: 80
-warmup_epochs: 1
+epoch: 2
+enable_sa2c: false
 
 purchase_only: false
 
-batch_size_train: 600 # ~30GB GPU mem
+batch_size_train: 128
 batch_size_val: 128
-num_workers_train: 4
+num_workers_train: 0
 num_workers_val: 0
 device_id: 2
 
@@ -29,10 +35,11 @@ clip: 0.0
 lr: 0.005
 lr_2: 0.001
 
+sampled_loss:
+  use: false
+
 max_steps: 0
 debug: false
 
-early_stopping_ep: 10
+early_stopping_ep: 5
 early_stopping_metric: ndcg@10
-
-

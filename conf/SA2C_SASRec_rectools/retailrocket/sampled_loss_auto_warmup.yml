@@ -1,17 +1,15 @@
 seed: 0
 dataset: retailrocket
 data: data
-epoch: 80
-warmup_epochs: 1
+epoch: 200
 
-purchase_only: true
-reward_fn: ndcg
+purchase_only: false
 
-batch_size_train: 8500
-batch_size_val: 256
+batch_size_train: 5500 # ~32GB GPU mem
+batch_size_val: 128
 num_workers_train: 4
 num_workers_val: 0
-device_id: 3
+device_id: 6
 
 hidden_factor: 64
 num_heads: 1
@@ -22,7 +20,6 @@ r_click: 0.2
 r_buy: 1.0
 r_negative: -0.0
 discount: 0.5
-neg: 10
 weight: 1.0
 smooth: 0.0
 clip: 0.0
@@ -30,10 +27,15 @@ clip: 0.0
 lr: 0.005
 lr_2: 0.001
 
-max_steps: 0
-debug: false
+sampled_loss:
+  use: true
+  ce_n_negatives: 256
+  critic_n_negatives: 256
 
+early_stopping_warmup_ep: 5
 early_stopping_ep: 10
 early_stopping_metric: ndcg@10
 
+max_steps: 0
+debug: false
 
