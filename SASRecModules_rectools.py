@@ -116,7 +116,7 @@ class SASRecQNetworkRectools(nn.Module):
         causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
         self.register_buffer("causal_attn_mask", causal, persistent=False)
 
-    def forward(self, inputs: torch.Tensor, len_state: torch.Tensor):
+    def forward(self, inputs: torch.Tensor, len_state: Optional[torch.Tensor] = None):
         bsz, seqlen = inputs.shape
         if seqlen != self.state_size:
             raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
@@ -136,15 +136,10 @@ class SASRecQNetworkRectools(nn.Module):
 
         seqs = self.layers(seqs, timeline_mask, attn_mask, key_padding_mask)
 
-        has_any = (inputs != self.pad_id).any(dim=1)
-        last_pos = torch.full((bsz,), self.state_size - 1, device=inputs.device, dtype=torch.long)
-        idx = torch.where(has_any, last_pos, torch.zeros_like(last_pos))
-        pooled = seqs[torch.arange(bsz, device=inputs.device), idx]
-
-        ce_logits = pooled @ self.item_emb.weight.t()
-        q_values = self.head_q(pooled)
-        q_values[:, self.pad_id] = float("-inf")
-        ce_logits[:, self.pad_id] = float("-inf")
-        return q_values, ce_logits
+        ce_logits_seq = seqs @ self.item_emb.weight.t()
+        q_values_seq = self.head_q(seqs)
+        q_values_seq[:, :, self.pad_id] = float("-inf")
+        ce_logits_seq[:, :, self.pad_id] = float("-inf")
+        return q_values_seq, ce_logits_seq
 
 
