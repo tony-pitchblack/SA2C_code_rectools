@@ -755,15 +755,15 @@ def main():
                     in_warmup = epoch_progress < warmup_epochs
                 else:
                     in_warmup = phase == "warmup"
-            if (not in_warmup) and (not entered_finetune):
-                entered_finetune = True
-                if not warmup_baseline_finalized:
-                    if np.isfinite(best_metric) and best_metric > float("-inf"):
-                        warmup_best_metric_scalar = float(best_metric)
-                        warmup_baseline_finalized = True
-                    if phase == "scheduled":
-                        best_metric_phase2 = float("-inf")
-                        epochs_since_improve_phase2 = 0
+                if (not in_warmup) and (not entered_finetune):
+                    entered_finetune = True
+                    if not warmup_baseline_finalized:
+                        if np.isfinite(best_metric) and best_metric > float("-inf"):
+                            warmup_best_metric_scalar = float(best_metric)
+                            warmup_baseline_finalized = True
+                        if phase == "scheduled":
+                            best_metric_phase2 = float("-inf")
+                            epochs_since_improve_phase2 = 0
 
                 sampled_cfg = cfg.get("sampled_loss") or {}
                 use_sampled_loss = bool(sampled_cfg.get("use", False))
@@ -949,11 +949,38 @@ def main():
                 epoch=int(epoch_idx + 1),
                 num_epochs=int(num_epochs),
             )
-            metric = float(val_metrics["overall"].get("ndcg@10", 0.0))
+            metric_1 = float(val_metrics["overall"].get("ndcg@10", 0.0))
+            _logger = logging.getLogger(__name__)
+            _prev_disabled = bool(getattr(_logger, "disabled", False))
+            _logger.disabled = True
+            try:
+                val_metrics_2 = evaluate(
+                    qn2,
+                    val_dl,
+                    reward_click,
+                    reward_buy,
+                    device,
+                    debug=bool(cfg.get("debug", False)),
+                    split="val(qn2)",
+                    state_size=state_size,
+                    item_num=item_num,
+                    purchase_only=purchase_only,
+                    epoch=int(epoch_idx + 1),
+                    num_epochs=int(num_epochs),
+                )
+            finally:
+                _logger.disabled = _prev_disabled
+            metric_2 = float(val_metrics_2["overall"].get("ndcg@10", 0.0))
+            if metric_2 > metric_1:
+                metric = float(metric_2)
+                best_state_for_epoch = qn2.state_dict()
+            else:
+                metric = float(metric_1)
+                best_state_for_epoch = qn1.state_dict()
             if metric > best_metric:
                 best_metric = metric
                 epochs_since_improve = 0
-                torch.save(qn1.state_dict(), run_dir / "best_model.pt")
+                torch.save(best_state_for_epoch, run_dir / "best_model.pt")
                 logger.info("best_model.pt updated (val ndcg@10=%f)", float(best_metric))
             else:
                 epochs_since_improve += 1
@@ -962,7 +989,7 @@ def main():
                 if metric > best_metric_warmup:
                     best_metric_warmup = metric
                     epochs_since_improve_warmup = 0
-                    torch.save(qn1.state_dict(), best_warmup_path)
+                    torch.save(best_state_for_epoch, best_warmup_path)
                     logger.info("best_warmup_model.pt updated (val ndcg@10=%f)", float(best_metric_warmup))
                 else:
                     epochs_since_improve_warmup += 1
