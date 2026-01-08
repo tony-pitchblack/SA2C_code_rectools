@@ -10,6 +10,7 @@ conda activate sa2c_code_torch
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default.yml
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/default.yml
+python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/default_sampled_loss.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only.yaml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only_ndcg.yml
 
@@ -17,6 +18,7 @@ python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/p
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default.yml
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/default.yml
+python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/default_sampled_loss.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only.yaml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only_ndcg.yml
 
