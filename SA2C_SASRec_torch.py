@@ -550,11 +550,24 @@ def main():
         else:
             device = torch.device("cpu")
 
+    if bool(cfg.get("debug", False)) and device.type == "cuda":
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+
     data_rel = str(cfg.get("data", "data"))
     data_directory = str(dataset_root / data_rel)
     data_statis = pd.read_pickle(os.path.join(data_directory, "data_statis.df"))
     state_size = int(data_statis["state_size"][0])
     item_num = int(data_statis["item_num"][0])
+    if bool(cfg.get("debug", False)):
+        logger.debug(
+            "model_cfg state_size=%d hidden_factor=%d num_heads=%d item_num=%d",
+            int(state_size),
+            int(cfg.get("hidden_factor", 64)),
+            int(cfg.get("num_heads", 1)),
+            int(item_num),
+        )
     use_rectools_backbone = bool(cfg.get("use_rectoools_backbone", cfg.get("use_rectools_backbone", False)))
     reward_click = float(cfg.get("r_click", 0.2))
     reward_buy = float(cfg.get("r_buy", 1.0))
