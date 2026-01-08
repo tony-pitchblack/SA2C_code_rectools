@@ -2,7 +2,7 @@ seed: 0
 dataset: yoochoose
 data: data
 epoch: 80
-warmup_epochs: 2
+warmup_epochs: 7
 
 purchase_only: false
 
