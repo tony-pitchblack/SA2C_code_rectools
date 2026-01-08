@@ -109,6 +109,8 @@ class SASRecQNetworkRectools(nn.Module):
             dropout_rate=float(dropout_rate),
         )
 
+        self.head_q = nn.Linear(self.hidden_size, self.item_num + 1)
+
         self.use_causal_attn = bool(use_causal_attn)
         self.use_key_padding_mask = bool(use_key_padding_mask)
         causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
@@ -139,9 +141,8 @@ class SASRecQNetworkRectools(nn.Module):
         idx = torch.where(has_any, last_pos, torch.zeros_like(last_pos))
         pooled = seqs[torch.arange(bsz, device=inputs.device), idx]
 
-        scores = pooled @ self.item_emb.weight.t()
-        q_values = scores
-        ce_logits = scores
+        ce_logits = pooled @ self.item_emb.weight.t()
+        q_values = self.head_q(pooled)
         q_values[:, self.pad_id] = float("-inf")
         ce_logits[:, self.pad_id] = float("-inf")
         return q_values, ce_logits
