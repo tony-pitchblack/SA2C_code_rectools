@@ -761,6 +761,9 @@ def main():
                     if np.isfinite(best_metric) and best_metric > float("-inf"):
                         warmup_best_metric_scalar = float(best_metric)
                         warmup_baseline_finalized = True
+                    if phase == "scheduled":
+                        best_metric_phase2 = float("-inf")
+                        epochs_since_improve_phase2 = 0
 
                 sampled_cfg = cfg.get("sampled_loss") or {}
                 use_sampled_loss = bool(sampled_cfg.get("use", False))
@@ -1021,6 +1024,22 @@ def main():
                             float(metric - warmup_best_metric_scalar),
                             float(warmup_best_metric_scalar),
                         )
+                    if (not use_auto_warmup) and phase == "scheduled":
+                        if metric > best_metric_phase2:
+                            best_metric_phase2 = metric
+                            epochs_since_improve_phase2 = 0
+                        else:
+                            epochs_since_improve_phase2 += 1
+                        logger.info(
+                            "finetune no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
+                            float(metric),
+                            float(best_metric_phase2),
+                            int(epochs_since_improve_phase2),
+                            int(early_patience),
+                        )
+                        if early_patience > 0 and epochs_since_improve_phase2 >= early_patience:
+                            logger.info("finetune early stopping triggered")
+                            break
                 else:
                     warmup_best_metric_scalar = float(max(warmup_best_metric_scalar, metric))
 
