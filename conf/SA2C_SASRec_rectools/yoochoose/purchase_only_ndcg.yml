@@ -2,6 +2,7 @@ seed: 0
 dataset: yoochoose
 data: data
 epoch: 80
+warmup_epochs: 2
 
 purchase_only: true
 reward_fn: ndcg
