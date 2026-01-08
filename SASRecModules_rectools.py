@@ -121,6 +121,18 @@ class SASRecQNetworkRectools(nn.Module):
         if seqlen != self.state_size:
             raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
 
+        seqs = self.encode_seq(inputs)
+        ce_logits_seq = seqs @ self.item_emb.weight.t()
+        q_values_seq = self.head_q(seqs)
+        q_values_seq[:, :, self.pad_id] = float("-inf")
+        ce_logits_seq[:, :, self.pad_id] = float("-inf")
+        return q_values_seq, ce_logits_seq
+
+    def encode_seq(self, inputs: torch.Tensor) -> torch.Tensor:
+        bsz, seqlen = inputs.shape
+        if seqlen != self.state_size:
+            raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
+
         timeline_mask = (inputs != self.pad_id).unsqueeze(-1).to(self.item_emb.weight.dtype)
 
         seqs = self.item_emb(inputs)
@@ -135,11 +147,19 @@ class SASRecQNetworkRectools(nn.Module):
             key_padding_mask = inputs == self.pad_id
 
         seqs = self.layers(seqs, timeline_mask, attn_mask, key_padding_mask)
+        return seqs
 
-        ce_logits_seq = seqs @ self.item_emb.weight.t()
-        q_values_seq = self.head_q(seqs)
-        q_values_seq[:, :, self.pad_id] = float("-inf")
-        ce_logits_seq[:, :, self.pad_id] = float("-inf")
-        return q_values_seq, ce_logits_seq
+    def score_ce_candidates(self, seqs_flat: torch.Tensor, cand_ids: torch.Tensor) -> torch.Tensor:
+        emb = self.item_emb(cand_ids)
+        logits = (seqs_flat[:, None, :] * emb).sum(dim=-1)
+        logits = logits.masked_fill(cand_ids.eq(self.pad_id), float("-inf"))
+        return logits
+
+    def score_q_candidates(self, seqs_flat: torch.Tensor, cand_ids: torch.Tensor) -> torch.Tensor:
+        w = self.head_q.weight[cand_ids]
+        b = self.head_q.bias[cand_ids]
+        logits = (seqs_flat[:, None, :] * w).sum(dim=-1) + b
+        logits = logits.masked_fill(cand_ids.eq(self.pad_id), float("-inf"))
+        return logits
 
 

@@ -61,6 +61,11 @@ def _default_config():
         "lr_2": 0.001,
         "discount": 0.5,
         "neg": 10,
+        "sampled_loss": {
+            "use": False,
+            "ce_n_negatives": 256,
+            "critic_n_negatives": 256,
+        },
         "weight": 1.0,
         "smooth": 0.0,
         "clip": 0.0,
@@ -687,6 +692,11 @@ def main():
             step_count = int(valid_mask.sum().item())
             discount = torch.full((step_count,), float(cfg.get("discount", 0.5)), dtype=torch.float32, device=device)
 
+            sampled_cfg = cfg.get("sampled_loss") or {}
+            use_sampled_loss = bool(sampled_cfg.get("use", False))
+            ce_n_neg = int(sampled_cfg.get("ce_n_negatives", 256))
+            critic_n_neg = int(sampled_cfg.get("critic_n_negatives", 256))
+
             pointer = np.random.randint(0, 2)
             if pointer == 0:
                 main_qn, target_qn = qn1, qn2
@@ -698,50 +708,116 @@ def main():
             main_qn.train()
             target_qn.train()
 
-            q_main_seq, ce_main_seq = main_qn(states_x)
-            if bool(cfg.get("debug", False)):
-                if not torch.isfinite(q_main_seq).all():
-                    raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
-                if not torch.isfinite(ce_main_seq).all():
-                    raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
-
-            with torch.no_grad():
-                q_tgt_seq, _ = target_qn(states_x)
-
-            q_next_selector = torch.zeros_like(q_main_seq)
-            q_next_target = torch.zeros_like(q_tgt_seq)
-            q_next_selector[:, :-1, :] = q_main_seq[:, 1:, :]
-            q_next_target[:, :-1, :] = q_tgt_seq[:, 1:, :]
-
-            q_curr_flat = q_main_seq[valid_mask]
-            ce_flat = ce_main_seq[valid_mask]
-            q_curr_tgt_flat = q_tgt_seq[valid_mask]
-            q_next_selector_flat = q_next_selector[valid_mask]
-            q_next_target_flat = q_next_target[valid_mask]
             action_flat = actions[valid_mask]
             is_buy_flat = is_buy[valid_mask]
             done_flat = done_mask[valid_mask].to(torch.float32)
 
-            if reward_fn == "ndcg":
+            if use_sampled_loss:
+                seqs_main = main_qn.encode_seq(states_x)
                 with torch.no_grad():
-                    reward_flat = _ndcg_reward_from_logits(ce_flat.detach(), action_flat)
+                    seqs_tgt = target_qn.encode_seq(states_x)
+
+                seqs_next_main = torch.zeros_like(seqs_main)
+                seqs_next_tgt = torch.zeros_like(seqs_tgt)
+                seqs_next_main[:, :-1, :] = seqs_main[:, 1:, :]
+                seqs_next_tgt[:, :-1, :] = seqs_tgt[:, 1:, :]
+
+                seqs_curr_flat = seqs_main[valid_mask]
+                seqs_curr_tgt_flat = seqs_tgt[valid_mask]
+                seqs_next_selector_flat = seqs_next_main[valid_mask]
+                seqs_next_target_flat = seqs_next_tgt[valid_mask]
+
+                if bool(cfg.get("debug", False)):
+                    if not torch.isfinite(seqs_curr_flat).all():
+                        raise FloatingPointError(f"Non-finite seq encodings at total_step={int(total_step)}")
+
+                crit_negs = _sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg, device=device)
+                crit_cands = torch.cat([action_flat[:, None], crit_negs], dim=1)
+                q_curr_c = main_qn.score_q_candidates(seqs_curr_flat, crit_cands)
+                q_curr_tgt_c = target_qn.score_q_candidates(seqs_curr_tgt_flat, crit_cands)
+                q_next_selector_c = main_qn.score_q_candidates(seqs_next_selector_flat, crit_cands)
+                q_next_target_c = target_qn.score_q_candidates(seqs_next_target_flat, crit_cands)
+
+                ce_negs = _sample_negative_actions(1, item_num + 1, action_flat, ce_n_neg, device=device)
+                ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
+                ce_logits_c = main_qn.score_ce_candidates(seqs_curr_flat, ce_cands)
+
+                if bool(cfg.get("debug", False)):
+                    if not torch.isfinite(q_curr_c).all():
+                        raise FloatingPointError(f"Non-finite q_values(cand) at total_step={int(total_step)}")
+                    if not torch.isfinite(ce_logits_c).all():
+                        raise FloatingPointError(f"Non-finite ce_logits(cand) at total_step={int(total_step)}")
+
+                if reward_fn == "ndcg":
+                    with torch.no_grad():
+                        ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
+                        ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
+                        ce_flat_full = ce_full_seq[valid_mask]
+                        reward_flat = _ndcg_reward_from_logits(ce_flat_full.detach(), action_flat)
+                else:
+                    reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+
+                a_star_idx = q_next_selector_c.argmax(dim=1)
+                q_tp1 = q_next_target_c.gather(1, a_star_idx[:, None]).squeeze(1)
+                target_pos = reward_flat + discount * q_tp1 * (1.0 - done_flat)
+                q_sa = q_curr_c[:, 0]
+                qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
+
+                a_star_curr_idx = q_curr_c.detach().argmax(dim=1)
+                q_t_star = q_curr_tgt_c.gather(1, a_star_curr_idx[:, None]).squeeze(1)
+                target_neg = float(reward_negative) + discount * q_t_star
+                q_sneg = q_curr_c[:, 1:]
+                qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
+
+                ce_loss_pre = F.cross_entropy(
+                    ce_logits_c,
+                    torch.zeros((int(ce_logits_c.shape[0]),), dtype=torch.long, device=device),
+                    reduction="none",
+                )
+                neg_count = int(critic_n_neg)
             else:
-                reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+                q_main_seq, ce_main_seq = main_qn(states_x)
+                if bool(cfg.get("debug", False)):
+                    if not torch.isfinite(q_main_seq).all():
+                        raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
+                    if not torch.isfinite(ce_main_seq).all():
+                        raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
 
-            a_star = q_next_selector_flat.argmax(dim=1)
-            q_tp1 = q_next_target_flat.gather(1, a_star[:, None]).squeeze(1)
-            target_pos = reward_flat + discount * q_tp1 * (1.0 - done_flat)
-            q_sa = q_curr_flat.gather(1, action_flat[:, None]).squeeze(1)
-            qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
+                with torch.no_grad():
+                    q_tgt_seq, _ = target_qn(states_x)
 
-            a_star_curr = q_curr_flat.detach().argmax(dim=1)
-            q_t_star = q_curr_tgt_flat.gather(1, a_star_curr[:, None]).squeeze(1)
-            target_neg = float(reward_negative) + discount * q_t_star
-            neg_actions = _sample_negative_actions(1, item_num + 1, action_flat, int(cfg.get("neg", 10)), device=device)
-            q_sneg = q_curr_flat.gather(1, neg_actions)
-            qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
+                q_next_selector = torch.zeros_like(q_main_seq)
+                q_next_target = torch.zeros_like(q_tgt_seq)
+                q_next_selector[:, :-1, :] = q_main_seq[:, 1:, :]
+                q_next_target[:, :-1, :] = q_tgt_seq[:, 1:, :]
 
-            ce_loss_pre = F.cross_entropy(ce_flat, action_flat, reduction="none")
+                q_curr_flat = q_main_seq[valid_mask]
+                ce_flat = ce_main_seq[valid_mask]
+                q_curr_tgt_flat = q_tgt_seq[valid_mask]
+                q_next_selector_flat = q_next_selector[valid_mask]
+                q_next_target_flat = q_next_target[valid_mask]
+
+                if reward_fn == "ndcg":
+                    with torch.no_grad():
+                        reward_flat = _ndcg_reward_from_logits(ce_flat.detach(), action_flat)
+                else:
+                    reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+
+                a_star = q_next_selector_flat.argmax(dim=1)
+                q_tp1 = q_next_target_flat.gather(1, a_star[:, None]).squeeze(1)
+                target_pos = reward_flat + discount * q_tp1 * (1.0 - done_flat)
+                q_sa = q_curr_flat.gather(1, action_flat[:, None]).squeeze(1)
+                qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
+
+                a_star_curr = q_curr_flat.detach().argmax(dim=1)
+                q_t_star = q_curr_tgt_flat.gather(1, a_star_curr[:, None]).squeeze(1)
+                target_neg = float(reward_negative) + discount * q_t_star
+                neg_count = int(cfg.get("neg", 10))
+                neg_actions = _sample_negative_actions(1, item_num + 1, action_flat, neg_count, device=device)
+                q_sneg = q_curr_flat.gather(1, neg_actions)
+                qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
+
+                ce_loss_pre = F.cross_entropy(ce_flat, action_flat, reduction="none")
 
             if total_step < 15000:
                 loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
@@ -753,14 +829,22 @@ def main():
                 total_step += int(step_count)
             else:
                 with torch.no_grad():
-                    prob = F.softmax(ce_flat, dim=1).gather(1, action_flat[:, None]).squeeze(1)
+                    if use_sampled_loss:
+                        prob = F.softmax(ce_logits_c, dim=1)[:, 0]
+                    else:
+                        prob = F.softmax(ce_flat, dim=1).gather(1, action_flat[:, None]).squeeze(1)
                 behavior_prob = behavior_prob_table[action_flat]
                 ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
 
                 with torch.no_grad():
-                    q_pos_det = q_curr_flat.gather(1, action_flat[:, None]).squeeze(1)
-                    q_neg_det = q_curr_flat.gather(1, neg_actions).sum(dim=1)
-                    q_avg = (q_pos_det + q_neg_det) / float(1 + int(cfg.get("neg", 10)))
+                    if use_sampled_loss:
+                        q_pos_det = q_curr_c[:, 0]
+                        q_neg_det = q_curr_c[:, 1:].sum(dim=1)
+                        q_avg = (q_pos_det + q_neg_det) / float(1 + int(neg_count))
+                    else:
+                        q_pos_det = q_curr_flat.gather(1, action_flat[:, None]).squeeze(1)
+                        q_neg_det = q_curr_flat.gather(1, neg_actions).sum(dim=1)
+                        q_avg = (q_pos_det + q_neg_det) / float(1 + int(neg_count))
                     advantage = q_pos_det - q_avg
                     if float(cfg.get("clip", 0.0)) > 0:
                         advantage = advantage.clamp(-float(cfg.get("clip", 0.0)), float(cfg.get("clip", 0.0)))
