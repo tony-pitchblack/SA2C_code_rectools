@@ -1,6 +1,6 @@
 gridsearch:
   enable: true
-  epochs_per_run: 5
+  epochs_per_run: 3
   metric: "overall.ndcg@10"
   direction: "maximize"
   n_trials: 40
@@ -31,18 +31,18 @@ epoch: 80
 enable_sa2c: true
 reward_fn: click_buy
 
-limit_chunks_pct: 0.2
+limit_chunks_pct: 0.1
 
 # phase1-only during gridsearch runs
-warmup_epochs: 5
+warmup_epochs: 3
 
 purchase_only: false
 
-batch_size_train: 400
+batch_size_train: 200
 batch_size_val: 128
 num_workers_train: 0
 num_workers_val: 0
-device_id: 5
+device_id: 7
 
 hidden_factor: 64
 num_heads: 1
