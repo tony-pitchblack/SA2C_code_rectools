@@ -1,6 +1,6 @@
 gridsearch:
   enable: true
-  epochs_per_run: 5
+  epochs_per_run: 3
   metric: "overall.ndcg@10"
   direction: "maximize"
   n_trials: 40
@@ -34,9 +34,9 @@ batch_size_train: 400
 batch_size_val: 128
 num_workers_train: 0
 num_workers_val: 0
-device_id: 5
+device_id: 3
 
-limit_chunks_pct: 0.2
+limit_chunks_pct: 0.1
 
 # tuned
 lr: "float(1e-4, 1e-2, log=true)"
