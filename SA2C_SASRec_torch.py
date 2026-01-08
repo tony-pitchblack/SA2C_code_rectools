@@ -226,12 +226,14 @@ def evaluate(
     reward_buy,
     device,
     *,
+    split: str = "val",
     state_size: int,
     item_num: int,
     purchase_only: bool = False,
     debug: bool = False,
     use_rectools_backbone: bool = False,
     epoch=None,
+    num_epochs=None,
 ):
     total_clicks = 0.0
     total_purchase = 0.0
@@ -246,7 +248,7 @@ def evaluate(
     model.eval()
     for items_pad, is_buy_pad, lengths in tqdm(
         session_loader,
-        desc="val",
+        desc=str(split),
         unit="batch",
         dynamic_ncols=True,
         leave=False,
@@ -314,9 +316,14 @@ def evaluate(
         overall[f"ndcg@{k}"] = float((ndcg_clicks[i] + ndcg_purchase[i]) / denom_all) if denom_all > 0 else 0.0
 
     logger = logging.getLogger(__name__)
-    prefix = f"epoch {epoch} " if epoch is not None else ""
+    if epoch is not None and num_epochs is not None:
+        prefix = f"epoch {int(epoch)}/{int(num_epochs)} "
+    elif epoch is not None:
+        prefix = f"epoch {int(epoch)} "
+    else:
+        prefix = ""
     logger.info("#############################################################")
-    logger.info("%sval metrics", prefix)
+    logger.info("%s%s metrics", prefix, str(split))
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -837,10 +844,12 @@ def main():
             device,
             debug=bool(cfg.get("debug", False)),
             use_rectools_backbone=use_rectools_backbone,
+            split="val",
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
             epoch=int(epoch_idx + 1),
+            num_epochs=int(num_epochs),
         )
         metric = float(val_metrics["overall"].get("ndcg@10", 0.0))
         if metric > best_metric:
@@ -886,6 +895,7 @@ def main():
         device,
         debug=bool(cfg.get("debug", False)),
         use_rectools_backbone=use_rectools_backbone,
+        split="val(best)",
         state_size=state_size,
         item_num=item_num,
         purchase_only=purchase_only,
@@ -898,6 +908,7 @@ def main():
         device,
         debug=bool(cfg.get("debug", False)),
         use_rectools_backbone=use_rectools_backbone,
+        split="test(best)",
         state_size=state_size,
         item_num=item_num,
         purchase_only=purchase_only,
