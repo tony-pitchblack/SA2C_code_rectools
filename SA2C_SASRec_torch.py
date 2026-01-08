@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument(
         "--smoke-cpu",
         action="store_true",
-        help="Force CPU device (no other overrides).",
+        help="Force CPU, set batch_size=8, run 1 epoch, and skip writing val/test result files (keeps logging).",
     )
     return parser.parse_args()
 
@@ -393,17 +393,23 @@ def _make_step_batch_from_sessions(
     t_col = t.unsqueeze(1)  # [L,1]
 
     idx_state = torch.where(t_col < s, idx1, (t_col - s) + idx1)  # [L,S]
-    idx_state_b = idx_state.unsqueeze(0).expand(bsz, lmax, s)
+    idx_state_oob = idx_state >= lmax
+    idx_state_safe = idx_state.clamp(min=0, max=lmax - 1)
+    idx_state_b = idx_state_safe.unsqueeze(0).expand(bsz, lmax, s)
     items_pad_3 = items_pad.unsqueeze(2).expand(bsz, lmax, s)
     state_all = items_pad_3.gather(1, idx_state_b)
     invalid_state = (t_col < s) & (idx1 >= t_col)
+    invalid_state = invalid_state | idx_state_oob
     state_all = state_all.masked_fill(invalid_state.unsqueeze(0).expand(bsz, lmax, s), int(pad_item))
 
     tnext_col = (t + 1).unsqueeze(1)
     idx_next = torch.where(tnext_col < s, idx1, (tnext_col - s) + idx1)
-    idx_next_b = idx_next.unsqueeze(0).expand(bsz, lmax, s)
+    idx_next_oob = idx_next >= lmax
+    idx_next_safe = idx_next.clamp(min=0, max=lmax - 1)
+    idx_next_b = idx_next_safe.unsqueeze(0).expand(bsz, lmax, s)
     next_state_all = items_pad_3.gather(1, idx_next_b)
     invalid_next = (tnext_col < s) & (idx1 >= tnext_col)
+    invalid_next = invalid_next | idx_next_oob
     next_state_all = next_state_all.masked_fill(invalid_next.unsqueeze(0).expand(bsz, lmax, s), int(pad_item))
 
     action_all = items_pad
@@ -520,7 +526,7 @@ def main():
     logger.info("run_dir: %s", str(run_dir))
     logger.info("dataset: %s", dataset_name)
     if bool(getattr(args, "smoke_cpu", False)):
-        logger.info("smoke_cpu: enabled (forcing CPU device)")
+        logger.info("smoke_cpu: enabled (forcing CPU, batch_size=8, epoch=1, skipping val/test result file writing)")
 
     seed = int(cfg.get("seed", 0))
     random.seed(seed)
@@ -533,6 +539,11 @@ def main():
     smoke_cpu = bool(getattr(args, "smoke_cpu", False))
     if smoke_cpu:
         device = torch.device("cpu")
+        num_epochs = 1
+        train_batch_size = 8
+        val_batch_size = 8
+        train_num_workers = 0
+        val_num_workers = 0
     else:
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{int(cfg.get('device_id', 0))}")
@@ -550,10 +561,11 @@ def main():
     reward_negative = float(cfg.get("r_negative", -0.0))
     purchase_only = bool(cfg.get("purchase_only", False))
 
-    train_batch_size = int(cfg.get("batch_size_train", 256))
-    val_batch_size = int(cfg.get("batch_size_val", 256))
-    train_num_workers = int(cfg.get("num_workers_train", 0))
-    val_num_workers = int(cfg.get("num_workers_val", 0))
+    if not smoke_cpu:
+        train_batch_size = int(cfg.get("batch_size_train", 256))
+        val_batch_size = int(cfg.get("batch_size_val", 256))
+        train_num_workers = int(cfg.get("num_workers_train", 0))
+        val_num_workers = int(cfg.get("num_workers_val", 0))
 
     with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
         pop_dict = eval(f.read())
@@ -902,10 +914,11 @@ def main():
         purchase_row[f"val/ndcg@{k}"] = float(val_purchase.get(f"ndcg@{k}", 0.0))
         purchase_row[f"test/ndcg@{k}"] = float(test_purchase.get(f"ndcg@{k}", 0.0))
 
-    df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
-    df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
-    df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
-    df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
+    if not smoke_cpu:
+        df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
+        df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
+        df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
+        df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
 
     overall_col_order = []
     for k in val_best["topk"]:
@@ -914,11 +927,12 @@ def main():
     for k in val_best["topk"]:
         overall_row[f"val/ndcg@{k}"] = float(val_overall.get(f"ndcg@{k}", 0.0))
         overall_row[f"test/ndcg@{k}"] = float(test_overall.get(f"ndcg@{k}", 0.0))
-    df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
-    df_overall.to_csv(run_dir / "results.csv", index=False)
+    if not smoke_cpu:
+        df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
+        df_overall.to_csv(run_dir / "results.csv", index=False)
 
-    with open(run_dir / "summary@10.txt", "w") as f:
-        f.write(_summary_at_k_text(val_best, test_best, k=10))
+        with open(run_dir / "summary@10.txt", "w") as f:
+            f.write(_summary_at_k_text(val_best, test_best, k=10))
 
 
 if __name__ == "__main__":
