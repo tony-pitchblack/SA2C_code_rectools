@@ -17,7 +17,7 @@ reward_fn: click_buy
 
 purchase_only: false
 
-batch_size_train: 200
+batch_size_train: 170
 batch_size_val: 128
 num_workers_train: 0
 num_workers_val: 0
