@@ -29,6 +29,11 @@ def parse_args():
     parser.add_argument("--early_stopping_metric", type=str, default=None, help="Early stopping metric (ndcg@10).")
     parser.add_argument("--max_steps", type=int, default=None, help="If set, stop after this many update steps.")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging and NaN checks (overrides config).")
+    parser.add_argument(
+        "--smoke-cpu",
+        action="store_true",
+        help="Force CPU, set batch_size=8, run 1 epoch, and skip writing val/test result files (keeps logging).",
+    )
     return parser.parse_args()
 
 
@@ -514,6 +519,8 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info("run_dir: %s", str(run_dir))
     logger.info("dataset: %s", dataset_name)
+    if bool(getattr(args, "smoke_cpu", False)):
+        logger.info("smoke_cpu: enabled (forcing CPU, batch_size=8, epoch=1, skipping val/test result file writing)")
 
     seed = int(cfg.get("seed", 0))
     random.seed(seed)
@@ -523,10 +530,19 @@ def main():
     num_epochs = int(cfg.get("epoch", 50))
     max_steps = int(cfg.get("max_steps", 0))
 
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{int(cfg.get('device_id', 0))}")
-    else:
+    smoke_cpu = bool(getattr(args, "smoke_cpu", False))
+    if smoke_cpu:
         device = torch.device("cpu")
+        num_epochs = 1
+        train_batch_size = 8
+        val_batch_size = 8
+        train_num_workers = 0
+        val_num_workers = 0
+    else:
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{int(cfg.get('device_id', 0))}")
+        else:
+            device = torch.device("cpu")
 
     data_rel = str(cfg.get("data", "data"))
     data_directory = str(dataset_root / data_rel)
@@ -539,10 +555,11 @@ def main():
     reward_negative = float(cfg.get("r_negative", -0.0))
     purchase_only = bool(cfg.get("purchase_only", False))
 
-    train_batch_size = int(cfg.get("batch_size_train", 256))
-    val_batch_size = int(cfg.get("batch_size_val", 256))
-    train_num_workers = int(cfg.get("num_workers_train", 0))
-    val_num_workers = int(cfg.get("num_workers_val", 0))
+    if not smoke_cpu:
+        train_batch_size = int(cfg.get("batch_size_train", 256))
+        val_batch_size = int(cfg.get("batch_size_val", 256))
+        train_num_workers = int(cfg.get("num_workers_train", 0))
+        val_num_workers = int(cfg.get("num_workers_val", 0))
 
     with open(os.path.join(data_directory, "pop_dict.txt"), "r") as f:
         pop_dict = eval(f.read())
@@ -891,10 +908,11 @@ def main():
         purchase_row[f"val/ndcg@{k}"] = float(val_purchase.get(f"ndcg@{k}", 0.0))
         purchase_row[f"test/ndcg@{k}"] = float(test_purchase.get(f"ndcg@{k}", 0.0))
 
-    df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
-    df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
-    df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
-    df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
+    if not smoke_cpu:
+        df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
+        df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
+        df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
+        df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
 
     overall_col_order = []
     for k in val_best["topk"]:
@@ -903,11 +921,12 @@ def main():
     for k in val_best["topk"]:
         overall_row[f"val/ndcg@{k}"] = float(val_overall.get(f"ndcg@{k}", 0.0))
         overall_row[f"test/ndcg@{k}"] = float(test_overall.get(f"ndcg@{k}", 0.0))
-    df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
-    df_overall.to_csv(run_dir / "results.csv", index=False)
+    if not smoke_cpu:
+        df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
+        df_overall.to_csv(run_dir / "results.csv", index=False)
 
-    with open(run_dir / "summary@10.txt", "w") as f:
-        f.write(_summary_at_k_text(val_best, test_best, k=10))
+        with open(run_dir / "summary@10.txt", "w") as f:
+            f.write(_summary_at_k_text(val_best, test_best, k=10))
 
 
 if __name__ == "__main__":
