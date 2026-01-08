@@ -21,7 +21,7 @@ batch_size_train: 400
 batch_size_val: 128
 num_workers_train: 0
 num_workers_val: 0
-device_id: 5
+device_id: 6
 
 hidden_factor: 64
 num_heads: 1
