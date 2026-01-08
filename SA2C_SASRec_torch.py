@@ -591,7 +591,7 @@ def main():
     opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
 
     total_step = 0
-    pin_memory = device.type == "cuda"
+    pin_memory = True
 
     t0 = time.perf_counter()
     train_ds = _SessionDataset(data_directory=data_directory, split_df_name="sampled_train.df")
