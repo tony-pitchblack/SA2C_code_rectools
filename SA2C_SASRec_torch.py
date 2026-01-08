@@ -39,6 +39,7 @@ def _default_config():
         "dataset": "retailrocket",
         "data": "data",
         "purchase_only": False,
+        "reward_fn": "click_buy",
         "batch_size_train": 256,
         "batch_size_val": 256,
         "num_workers_train": 0,
@@ -190,6 +191,26 @@ def _sample_negative_actions(min_id: int, max_id_exclusive: int, actions, neg, d
         )
         bad = neg_actions.eq(actions[:, None])
     return neg_actions
+
+
+def _ndcg_reward_from_logits(ce_logits: torch.Tensor, action_t: torch.Tensor) -> torch.Tensor:
+    if ce_logits.ndim != 2:
+        raise ValueError(f"Expected ce_logits shape [B,V], got {tuple(ce_logits.shape)}")
+    if action_t.ndim != 1:
+        raise ValueError(f"Expected action_t shape [B], got {tuple(action_t.shape)}")
+    bsz, vocab = ce_logits.shape
+    if action_t.shape[0] != bsz:
+        raise ValueError(f"Batch mismatch: ce_logits[0]={bsz} action_t[0]={int(action_t.shape[0])}")
+    if not torch.is_floating_point(ce_logits):
+        ce_logits = ce_logits.to(torch.float32)
+    action_t = action_t.to(torch.long)
+    if torch.any(action_t < 0) or torch.any(action_t >= vocab):
+        bad = action_t[(action_t < 0) | (action_t >= vocab)]
+        raise ValueError(f"action_t contains out-of-range ids (vocab={vocab}), e.g. {bad[:8].tolist()}")
+
+    target = ce_logits.gather(1, action_t[:, None]).squeeze(1)
+    rank = (ce_logits > target[:, None]).sum(dim=1).to(torch.float32) + 1.0
+    return 1.0 / torch.log2(rank + 1.0)
 
 
 @torch.no_grad()
@@ -456,6 +477,9 @@ def main():
     cfg = _apply_cli_overrides(cfg, args)
     if str(cfg.get("early_stopping_metric", "ndcg@10")) != "ndcg@10":
         raise ValueError("Only early_stopping_metric='ndcg@10' is supported.")
+    reward_fn = str(cfg.get("reward_fn", "click_buy"))
+    if reward_fn not in {"click_buy", "ndcg"}:
+        raise ValueError("reward_fn must be one of: click_buy | ndcg")
     dataset_name = str(cfg.get("dataset", "retailrocket"))
     dataset_root = _resolve_dataset_root(dataset_name)
     config_name = Path(config_path).stem
@@ -655,8 +679,7 @@ def main():
                 stop_training = True
                 break
             state, len_state, next_state, len_next_state, action, is_buy, is_done = batch
-            reward = torch.where(is_buy == 1, reward_buy, reward_click).to(torch.float32)
-            discount = torch.full_like(reward, float(cfg.get("discount", 0.5)), dtype=torch.float32)
+            discount = torch.full_like(is_buy, float(cfg.get("discount", 0.5)), dtype=torch.float32)
 
             pointer = np.random.randint(0, 2)
             if pointer == 0:
@@ -674,7 +697,6 @@ def main():
             next_state_t = next_state.to(device, non_blocking=pin_memory)
             len_next_state_t = len_next_state.to(device, non_blocking=pin_memory)
             action_t = action.to(device, non_blocking=pin_memory).to(torch.long)
-            reward_t = reward.to(device, non_blocking=pin_memory)
             discount_t = discount.to(device, non_blocking=pin_memory)
             done_t = is_done.to(device, non_blocking=pin_memory).to(torch.float32)
 
@@ -694,6 +716,13 @@ def main():
                     raise FloatingPointError(f"Non-finite q_values at total_step={int(total_step)}")
                 if not torch.isfinite(ce_logits).all():
                     raise FloatingPointError(f"Non-finite ce_logits at total_step={int(total_step)}")
+
+            if reward_fn == "ndcg":
+                with torch.no_grad():
+                    reward_t = _ndcg_reward_from_logits(ce_logits.detach(), action_t)
+            else:
+                reward_t = torch.where(is_buy == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+                reward_t = reward_t.to(device, non_blocking=pin_memory)
 
             a_star = q_next_selector.argmax(dim=1)
             q_tp1 = q_next_target.gather(1, a_star[:, None]).squeeze(1)
