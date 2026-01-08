@@ -12,9 +12,9 @@ enable_sa2c: false
 
 purchase_only: false
 
-batch_size_train: 600
+batch_size_train: 400
 batch_size_val: 128
-num_workers_train: 4
+num_workers_train: 0
 num_workers_val: 0
 device_id: 2
 
