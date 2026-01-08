@@ -2,7 +2,7 @@ seed: 0
 dataset: retailrocket
 data: data
 epoch: 200
-warmup_epochs: 1
+warmup_epochs: 10
 
 purchase_only: false
 
