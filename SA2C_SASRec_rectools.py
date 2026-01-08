@@ -45,6 +45,7 @@ def _default_config():
         "data": "data",
         "purchase_only": False,
         "reward_fn": "click_buy",
+        "warmup_epochs": 0.02,
         "batch_size_train": 256,
         "batch_size_val": 256,
         "num_workers_train": 0,
@@ -660,12 +661,14 @@ def main():
                 float(test_dl_s),
             )
 
-        for batch in tqdm(
-            dl,
-            total=num_batches,
-            desc=f"train epoch {epoch_idx + 1}/{num_epochs}",
-            unit="batch",
-            dynamic_ncols=True,
+        for batch_idx, batch in enumerate(
+            tqdm(
+                dl,
+                total=num_batches,
+                desc=f"train epoch {epoch_idx + 1}/{num_epochs}",
+                unit="batch",
+                dynamic_ncols=True,
+            )
         ):
             if max_steps > 0 and total_step >= max_steps:
                 stop_training = True
@@ -691,6 +694,9 @@ def main():
 
             step_count = int(valid_mask.sum().item())
             discount = torch.full((step_count,), float(cfg.get("discount", 0.5)), dtype=torch.float32, device=device)
+            warmup_epochs = float(cfg.get("warmup_epochs", 0.0))
+            epoch_progress = float(epoch_idx) + (float(batch_idx) / float(max(1, num_batches)))
+            in_warmup = epoch_progress < warmup_epochs
 
             sampled_cfg = cfg.get("sampled_loss") or {}
             use_sampled_loss = bool(sampled_cfg.get("use", False))
@@ -819,7 +825,7 @@ def main():
 
                 ce_loss_pre = F.cross_entropy(ce_flat, action_flat, reduction="none")
 
-            if total_step < 15000:
+            if in_warmup:
                 loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
                 if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                     raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
