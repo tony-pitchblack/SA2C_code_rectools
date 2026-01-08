@@ -3,8 +3,6 @@ dataset: yoochoose
 data: data
 epoch: 80
 enable_sa2c: false
-warmup_epochs: 7
-early_stopping_warmup_ep: null
 
 purchase_only: false
 
