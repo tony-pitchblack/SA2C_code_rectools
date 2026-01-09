@@ -9,6 +9,19 @@ from .data_utils.sessions import make_shifted_batch_from_sessions
 from .utils import tqdm
 
 
+def get_metric_value(metrics: dict, key: str) -> float:
+    k = str(key).strip()
+    if k.startswith("ndcg@") or k.startswith("hr@"):
+        k = f"overall.{k}"
+    parts = [p for p in k.split(".") if p]
+    if len(parts) != 2:
+        raise ValueError(f"metric must look like 'overall.ndcg@10', got {key!r}")
+    section, name = parts[0], parts[1]
+    if section not in {"overall", "click", "purchase"}:
+        raise ValueError(f"metric section must be overall|click|purchase, got {section!r}")
+    return float(metrics.get(section, {}).get(name, 0.0))
+
+
 def calculate_hit(
     sorted_list,
     topk,
@@ -348,6 +361,7 @@ __all__ = [
     "evaluate_loo",
     "calculate_hit",
     "ndcg_reward_from_logits",
+    "get_metric_value",
     "metrics_row",
     "overall_row",
     "summary_at_k_text",

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.utils.data import RandomSampler
 
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
-from ..metrics import evaluate
+from ..metrics import evaluate, get_metric_value
 from ..models import SASRecBaselineRectools
 from ..utils import tqdm
 
@@ -33,6 +33,8 @@ def train_baseline(
     pin_memory: bool,
     max_steps: int,
     evaluate_fn=None,
+    metric_key: str = "overall.ndcg@10",
+    trial=None,
 ):
     logger = logging.getLogger(__name__)
     model = SASRecBaselineRectools(
@@ -142,16 +144,21 @@ def train_baseline(
             epoch=int(epoch_idx + 1),
             num_epochs=int(num_epochs),
         )
-        metric = float(val_metrics["overall"].get("ndcg@10", 0.0))
+        metric = float(get_metric_value(val_metrics, metric_key))
+        if trial is not None:
+            trial.report(float(metric), step=int(epoch_idx))
+            if bool(getattr(trial, "should_prune", lambda: False)()):
+                raise RuntimeError("optuna_pruned")
         if metric > best_metric:
             best_metric = metric
             epochs_since_improve = 0
             torch.save(model.state_dict(), run_dir / "best_model.pt")
-            logger.info("best_model.pt updated (val ndcg@10=%f)", float(best_metric))
+            logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric))
         else:
             epochs_since_improve += 1
             logger.info(
-                "no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
+                "no improvement (val %s=%f best=%f) patience=%d/%d",
+                str(metric_key),
                 float(metric),
                 float(best_metric),
                 int(epochs_since_improve),

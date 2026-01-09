@@ -19,6 +19,7 @@ from .logging_utils import configure_logging, dump_config
 from .models import SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
 from .metrics import evaluate, evaluate_loo
+from .gridsearch import run_optuna_gridsearch
 from .training.baseline import train_baseline
 from .training.sa2c import train_sa2c
 
@@ -211,6 +212,31 @@ def main():
         shuffle=False,
     )
     test_dl_s = time.perf_counter() - t0
+
+    gs_cfg = cfg.get("gridsearch") or {}
+    if bool(gs_cfg.get("enable", False)):
+        run_optuna_gridsearch(
+            cfg=cfg,
+            base_run_dir=run_dir,
+            device=device,
+            train_ds=train_ds,
+            val_dl=val_dl,
+            test_dl=test_dl,
+            pop_dict_path=Path(pop_dict_path) if enable_sa2c else None,
+            reward_click=reward_click,
+            reward_buy=reward_buy,
+            reward_negative=reward_negative,
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+            num_batches=num_batches,
+            train_batch_size=train_batch_size,
+            train_num_workers=train_num_workers,
+            pin_memory=pin_memory,
+            reward_fn=reward_fn,
+            smoke_cpu=smoke_cpu,
+        )
+        return
 
     if enable_sa2c:
         best_path, warmup_path = train_sa2c(

@@ -16,6 +16,12 @@ class SessionDataset(Dataset):
         self.items_list = ds.items_list
         self.is_buy_list = ds.is_buy_list
 
+    def __len__(self):
+        return int(len(self.items_list))
+
+    def __getitem__(self, idx: int):
+        return self.items_list[int(idx)], self.is_buy_list[int(idx)]
+
 
 class SessionDatasetFromDF(Dataset):
     def __init__(self, df: pd.DataFrame):

@@ -45,6 +45,15 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/purc
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml --smoke-cpu --max_steps 64
 ```
 
+## Optuna gridsearch (rectools)
+
+```bash
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline_gridsearch.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline_gridsearch.yml
+```
+
 ## persrec_tc5 (BERT4Rec parquet format) — rectools
 
 - Expects parquet at `data/persrec_tc5_<calc_date>/dataset_train.parquet/` (directory of parquet part-files).
