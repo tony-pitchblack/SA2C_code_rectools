@@ -64,6 +64,7 @@ source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_gridsearch.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_gridsearch.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup_subset_10pct.yml
 ```
 
 ## persrec_tc5 (BERT4Rec parquet format) — rectools
