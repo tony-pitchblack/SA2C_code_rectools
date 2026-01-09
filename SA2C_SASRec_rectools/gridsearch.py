@@ -92,6 +92,7 @@ def run_optuna_gridsearch(
 
         try:
             if enable_sa2c:
+                reward_negative_trial = float(trial_cfg.get("r_negative", reward_negative))
                 if pop_dict_path is None:
                     raise ValueError("pop_dict_path is required when enable_sa2c=true")
                 best_path, _ = train_sa2c(
@@ -103,7 +104,7 @@ def run_optuna_gridsearch(
                     device=device,
                     reward_click=reward_click,
                     reward_buy=reward_buy,
-                    reward_negative=reward_negative,
+                    reward_negative=reward_negative_trial,
                     state_size=state_size,
                     item_num=item_num,
                     purchase_only=purchase_only,

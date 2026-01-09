@@ -162,7 +162,15 @@ def main():
 
     reward_click = float(cfg.get("r_click", 0.2))
     reward_buy = float(cfg.get("r_buy", 1.0))
-    reward_negative = float(cfg.get("r_negative", -0.0))
+    rneg_cfg = cfg.get("r_negative", -0.0)
+    if isinstance(rneg_cfg, str) and ("(" in rneg_cfg) and rneg_cfg.strip().endswith(")"):
+        gs_cfg0 = cfg.get("gridsearch") or {}
+        if bool(gs_cfg0.get("enable", False)):
+            reward_negative = 0.0
+        else:
+            reward_negative = float(rneg_cfg)
+    else:
+        reward_negative = float(rneg_cfg)
     purchase_only = bool(cfg.get("purchase_only", False))
 
     if not smoke_cpu:
