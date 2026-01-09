@@ -5,7 +5,7 @@ import logging
 import numpy as np
 import torch
 
-from .data.sessions import make_shifted_batch_from_sessions
+from .data_utils.sessions import make_shifted_batch_from_sessions
 from .utils import tqdm
 
 

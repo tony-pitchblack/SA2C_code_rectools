@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import RandomSampler
 
-from ..data.sessions import make_session_loader, make_shifted_batch_from_sessions
+from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
 from ..metrics import evaluate, ndcg_reward_from_logits
 from ..models import SASRecQNetworkRectools
 from ..utils import tqdm

@@ -12,9 +12,9 @@ import torch
 from .artifacts import write_results
 from .cli import parse_args
 from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config
-from .data.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
-from .data.persrec_tc5 import prepare_persrec_tc5
-from .data.sessions import SessionDataset, make_session_loader
+from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
+from .data_utils.persrec_tc5 import prepare_persrec_tc5
+from .data_utils.sessions import SessionDataset, make_session_loader
 from .logging_utils import configure_logging, dump_config
 from .models import SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
