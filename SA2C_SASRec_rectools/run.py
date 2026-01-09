@@ -67,6 +67,13 @@ def main():
 
     bert4rec_loo_cfg = cfg.get("bert4rec_loo") or {}
     use_bert4rec_loo = bool(isinstance(bert4rec_loo_cfg, dict) and bool(bert4rec_loo_cfg.get("enable", False)))
+    val_samples_num = int(bert4rec_loo_cfg.get("val_samples_num", 0)) if use_bert4rec_loo else 0
+    test_samples_num = int(bert4rec_loo_cfg.get("test_samples_num", 0)) if use_bert4rec_loo else 0
+    sanity = bool(getattr(args, "sanity", False)) or bool(cfg.get("sanity", False))
+    if use_bert4rec_loo and sanity:
+        cap = 1000
+        val_samples_num = min(int(val_samples_num), int(cap))
+        test_samples_num = min(int(test_samples_num), int(cap))
     eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
 
     num_epochs = int(cfg.get("epoch", 50))
@@ -100,8 +107,8 @@ def main():
                 dataset_name=dataset_name,
                 dataset_cfg=dict(dataset_cfg),
                 seed=int(cfg.get("seed", 0)),
-                val_samples_num=int(bert4rec_loo_cfg.get("val_samples_num", 0)),
-                test_samples_num=int(bert4rec_loo_cfg.get("test_samples_num", 0)),
+                val_samples_num=int(val_samples_num),
+                test_samples_num=int(test_samples_num),
             )
         else:
             data_directory, data_statis_path, pop_dict_path, train_ds, val_ds, test_ds = prepare_persrec_tc5(
@@ -154,8 +161,8 @@ def main():
                 data_directory=data_directory,
                 split_df_names=["sampled_train.df", "sampled_val.df", "sampled_test.df"],
                 seed=int(cfg.get("seed", 0)),
-                val_samples_num=int(bert4rec_loo_cfg.get("val_samples_num", 0)),
-                test_samples_num=int(bert4rec_loo_cfg.get("test_samples_num", 0)),
+                val_samples_num=int(val_samples_num),
+                test_samples_num=int(test_samples_num),
             )
             train_ds_s = 0.0
             val_ds_s = 0.0
