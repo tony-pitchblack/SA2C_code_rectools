@@ -1,0 +1,50 @@
+seed: 0
+dataset:
+  calc_date: "2025-08-21"
+  hdfs_working_prefix: "hdfs:///user/antonchernov/bert4recv1/tc5/"
+  user_column: loyalty_cardholder_rk
+  product_column: product_id
+  state_size: 50
+  use_sanity_subset: false
+bert4rec_loo:
+  enable: true
+  val_samples_num: 20000
+  test_samples_num: 20000
+data: data
+epoch: 50
+enable_sa2c: false
+
+purchase_only: false
+
+batch_size_train: 400
+batch_size_val: 128
+num_workers_train: 0
+num_workers_val: 0
+device_id: 5
+
+hidden_factor: 256
+num_heads: 8
+num_blocks: 4
+dropout_rate: 0.2
+
+r_click: 0.2
+r_buy: 1.0
+r_negative: -0.0
+discount: 0.5
+neg: 10
+weight: 1.0
+smooth: 0.0
+clip: 0.0
+
+lr: 0.001
+lr_2: 0.001
+
+sampled_loss:
+  use: false
+
+max_steps: 0
+debug: false
+
+early_stopping_ep: 10
+early_stopping_metric: ndcg@10
+
