@@ -51,8 +51,10 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/base
 - If missing, downloads from `<dataset.hdfs_working_prefix>/training/dataset_train.parquet` (tries `hdfs dfs -get`, then `hadoop fs -get`).
 
 ```bash
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/baseline.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/baseline_sanity.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/baseline.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/baseline.yml --sanity
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_loo.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_loo.yml --sanity
 ```
 
 - Regular artifacts (created if missing):
@@ -65,6 +67,9 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_20
   - `data/persrec_tc5_2025-08-21/data_splits_sanity.npz`
   - `data/persrec_tc5_2025-08-21/data_statis_sanity.df`
   - `data/persrec_tc5_2025-08-21/pop_dict_sanity.txt`
+- BERT4Rec-style LOO split artifacts (created if missing):
+  - `data/persrec_tc5_2025-08-21/bert4rec_eval/dataset_splits.npz`
+  - `data/persrec_tc5_2025-08-21/bert4rec_eval/dataset_splits_sanity.npz`
 
 ## Install conda envs (torch / tf)
 

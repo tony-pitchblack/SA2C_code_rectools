@@ -32,6 +32,7 @@ def train_baseline(
     train_num_workers: int,
     pin_memory: bool,
     max_steps: int,
+    evaluate_fn=None,
 ):
     logger = logging.getLogger(__name__)
     model = SASRecBaselineRectools(
@@ -126,7 +127,8 @@ def train_baseline(
             opt.step()
             total_step += int(valid_mask.sum().item())
 
-        val_metrics = evaluate(
+        eval_fn = evaluate if evaluate_fn is None else evaluate_fn
+        val_metrics = eval_fn(
             model,
             val_dl,
             reward_click,

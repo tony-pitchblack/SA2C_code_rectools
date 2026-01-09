@@ -9,6 +9,7 @@ def default_config() -> dict:
         "epoch": 50,
         "dataset": "retailrocket",
         "data": "data",
+        "sanity": False,
         "purchase_only": False,
         "reward_fn": "click_buy",
         "enable_sa2c": True,
@@ -35,6 +36,11 @@ def default_config() -> dict:
             "ce_n_negatives": 256,
             "critic_n_negatives": 256,
         },
+        "bert4rec_loo": {
+            "enable": False,
+            "val_samples_num": 0,
+            "test_samples_num": 0,
+        },
         "weight": 1.0,
         "smooth": 0.0,
         "clip": 0.0,
@@ -56,6 +62,15 @@ def load_config(path: str) -> dict:
 
 
 def apply_cli_overrides(cfg: dict, args) -> dict:
+    sanity_cli = bool(getattr(args, "sanity", False))
+    dataset_cfg = cfg.get("dataset", None)
+    sanity_cfg = bool(cfg.get("sanity", False))
+    sanity_dataset = bool(dataset_cfg.get("use_sanity_subset", False)) if isinstance(dataset_cfg, dict) else False
+    sanity = bool(sanity_cli or sanity_cfg or sanity_dataset)
+    cfg["sanity"] = sanity
+    if isinstance(dataset_cfg, dict) and ("use_sanity_subset" in dataset_cfg):
+        dataset_cfg["use_sanity_subset"] = bool(sanity)
+
     if args.early_stopping_ep is not None:
         cfg["early_stopping_ep"] = int(args.early_stopping_ep)
     if args.early_stopping_metric is not None:

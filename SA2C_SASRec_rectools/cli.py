@@ -4,6 +4,11 @@ import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description="Train SA2C (Rectools) with per-position SASRec logits.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config.")
+    parser.add_argument(
+        "--sanity",
+        action="store_true",
+        help="Enable persrec_tc5 sanity subset loading and use *_sanity run dir suffix.",
+    )
     parser.add_argument("--early_stopping_ep", type=int, default=None, help="Patience epochs for early stopping.")
     parser.add_argument("--early_stopping_metric", type=str, default=None, help="Early stopping metric (ndcg@10).")
     parser.add_argument("--max_steps", type=int, default=None, help="If set, stop after this many update steps.")

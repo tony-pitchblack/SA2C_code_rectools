@@ -12,12 +12,13 @@ import torch
 from .artifacts import write_results
 from .cli import parse_args
 from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config
+from .data.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
 from .data.persrec_tc5 import prepare_persrec_tc5
 from .data.sessions import SessionDataset, make_session_loader
 from .logging_utils import configure_logging, dump_config
 from .models import SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
-from .metrics import evaluate
+from .metrics import evaluate, evaluate_loo
 from .training.baseline import train_baseline
 from .training.sa2c import train_sa2c
 
@@ -47,6 +48,8 @@ def main():
         dataset_root = resolve_dataset_root(dataset_name)
 
     config_name = Path(config_path).stem
+    if bool(getattr(args, "sanity", False)):
+        config_name = f"{config_name}_sanity"
     run_dir = make_run_dir(dataset_name, config_name)
     configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
     dump_config(cfg, run_dir)
@@ -61,6 +64,10 @@ def main():
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+    bert4rec_loo_cfg = cfg.get("bert4rec_loo") or {}
+    use_bert4rec_loo = bool(isinstance(bert4rec_loo_cfg, dict) and bool(bert4rec_loo_cfg.get("enable", False)))
+    eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
 
     num_epochs = int(cfg.get("epoch", 50))
     max_steps = int(cfg.get("max_steps", 0))
@@ -86,13 +93,24 @@ def main():
 
     data_rel = str(cfg.get("data", "data"))
     if persrec_tc5:
-        data_directory, data_statis_path, pop_dict_path, train_ds, val_ds, test_ds = prepare_persrec_tc5(
-            dataset_root=dataset_root,
-            data_rel=data_rel,
-            dataset_name=dataset_name,
-            dataset_cfg=dict(dataset_cfg),
-            seed=int(cfg.get("seed", 0)),
-        )
+        if use_bert4rec_loo:
+            data_directory, data_statis_path, pop_dict_path, train_ds, val_ds, test_ds = prepare_persrec_tc5_bert4rec_loo(
+                dataset_root=dataset_root,
+                data_rel=data_rel,
+                dataset_name=dataset_name,
+                dataset_cfg=dict(dataset_cfg),
+                seed=int(cfg.get("seed", 0)),
+                val_samples_num=int(bert4rec_loo_cfg.get("val_samples_num", 0)),
+                test_samples_num=int(bert4rec_loo_cfg.get("test_samples_num", 0)),
+            )
+        else:
+            data_directory, data_statis_path, pop_dict_path, train_ds, val_ds, test_ds = prepare_persrec_tc5(
+                dataset_root=dataset_root,
+                data_rel=data_rel,
+                dataset_name=dataset_name,
+                dataset_cfg=dict(dataset_cfg),
+                seed=int(cfg.get("seed", 0)),
+            )
     else:
         data_directory = str(dataset_root / data_rel)
         data_statis_path = Path(data_directory) / "data_statis.df"
@@ -126,12 +144,26 @@ def main():
 
     pin_memory = True
 
-    if not persrec_tc5:
-        t0 = time.perf_counter()
-        train_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_train.df")
-        train_ds_s = time.perf_counter() - t0
-    else:
+    if persrec_tc5:
         train_ds_s = 0.0
+        val_ds_s = 0.0
+        test_ds_s = 0.0
+    else:
+        if use_bert4rec_loo:
+            train_ds, val_ds, test_ds = prepare_sessions_bert4rec_loo(
+                data_directory=data_directory,
+                split_df_names=["sampled_train.df", "sampled_val.df", "sampled_test.df"],
+                seed=int(cfg.get("seed", 0)),
+                val_samples_num=int(bert4rec_loo_cfg.get("val_samples_num", 0)),
+                test_samples_num=int(bert4rec_loo_cfg.get("test_samples_num", 0)),
+            )
+            train_ds_s = 0.0
+            val_ds_s = 0.0
+            test_ds_s = 0.0
+        else:
+            t0 = time.perf_counter()
+            train_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_train.df")
+            train_ds_s = time.perf_counter() - t0
 
     num_sessions = int(len(train_ds))
     num_batches = int(num_sessions / train_batch_size)
@@ -143,12 +175,10 @@ def main():
             int(train_batch_size),
         )
 
-    if not persrec_tc5:
+    if (not persrec_tc5) and (not use_bert4rec_loo):
         t0 = time.perf_counter()
         val_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_val.df")
         val_ds_s = time.perf_counter() - t0
-    else:
-        val_ds_s = 0.0
     t0 = time.perf_counter()
     val_dl = make_session_loader(
         val_ds,
@@ -160,12 +190,10 @@ def main():
     )
     val_dl_s = time.perf_counter() - t0
 
-    if not persrec_tc5:
+    if (not persrec_tc5) and (not use_bert4rec_loo):
         t0 = time.perf_counter()
         test_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_test.df")
         test_ds_s = time.perf_counter() - t0
-    else:
-        test_ds_s = 0.0
     t0 = time.perf_counter()
     test_dl = make_session_loader(
         test_ds,
@@ -198,6 +226,7 @@ def main():
             pin_memory=pin_memory,
             max_steps=max_steps,
             reward_fn=reward_fn,
+            evaluate_fn=eval_fn,
         )
         best_model = SASRecQNetworkRectools(
             item_num=item_num,
@@ -226,6 +255,7 @@ def main():
             train_num_workers=train_num_workers,
             pin_memory=pin_memory,
             max_steps=max_steps,
+            evaluate_fn=eval_fn,
         )
         warmup_path = None
         best_model = SASRecBaselineRectools(
@@ -238,7 +268,7 @@ def main():
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
 
-    val_best = evaluate(
+    val_best = eval_fn(
         best_model,
         val_dl,
         reward_click,
@@ -250,7 +280,7 @@ def main():
         item_num=item_num,
         purchase_only=purchase_only,
     )
-    test_best = evaluate(
+    test_best = eval_fn(
         best_model,
         test_dl,
         reward_click,
@@ -276,7 +306,7 @@ def main():
         ).to(device)
         warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
 
-        val_warmup = evaluate(
+        val_warmup = eval_fn(
             warmup_model,
             val_dl,
             reward_click,
@@ -288,7 +318,7 @@ def main():
             item_num=item_num,
             purchase_only=purchase_only,
         )
-        test_warmup = evaluate(
+        test_warmup = eval_fn(
             warmup_model,
             test_dl,
             reward_click,

@@ -46,6 +46,7 @@ def train_sa2c(
     pin_memory: bool,
     max_steps: int,
     reward_fn: str,
+    evaluate_fn=None,
 ) -> tuple[Path, Path | None]:
     logger = logging.getLogger(__name__)
     with open(str(pop_dict_path), "r") as f:
@@ -334,7 +335,8 @@ def train_sa2c(
                 opt2.step()
                 total_step += int(step_count)
 
-        val_metrics = evaluate(
+        eval_fn = evaluate if evaluate_fn is None else evaluate_fn
+        val_metrics = eval_fn(
             qn1,
             val_dl,
             reward_click,
@@ -353,7 +355,7 @@ def train_sa2c(
         _prev_disabled = bool(getattr(_logger, "disabled", False))
         _logger.disabled = True
         try:
-            val_metrics_2 = evaluate(
+            val_metrics_2 = eval_fn(
                 qn2,
                 val_dl,
                 reward_click,
