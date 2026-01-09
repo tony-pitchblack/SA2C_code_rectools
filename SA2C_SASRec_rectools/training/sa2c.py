@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import RandomSampler
 
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
-from ..metrics import evaluate, ndcg_reward_from_logits
+from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
 from ..models import SASRecQNetworkRectools
 from ..utils import tqdm
 
@@ -47,6 +47,8 @@ def train_sa2c(
     max_steps: int,
     reward_fn: str,
     evaluate_fn=None,
+    metric_key: str = "overall.ndcg@10",
+    trial=None,
 ) -> tuple[Path, Path | None]:
     logger = logging.getLogger(__name__)
     with open(str(pop_dict_path), "r") as f:
@@ -350,7 +352,7 @@ def train_sa2c(
             epoch=int(epoch_idx + 1),
             num_epochs=int(num_epochs),
         )
-        metric_1 = float(val_metrics["overall"].get("ndcg@10", 0.0))
+        metric_1 = float(get_metric_value(val_metrics, metric_key))
         _logger = logging.getLogger(__name__)
         _prev_disabled = bool(getattr(_logger, "disabled", False))
         _logger.disabled = True
@@ -371,28 +373,33 @@ def train_sa2c(
             )
         finally:
             _logger.disabled = _prev_disabled
-        metric_2 = float(val_metrics_2["overall"].get("ndcg@10", 0.0))
+        metric_2 = float(get_metric_value(val_metrics_2, metric_key))
         if metric_2 > metric_1:
             metric = float(metric_2)
             best_state_for_epoch = qn2.state_dict()
         else:
             metric = float(metric_1)
             best_state_for_epoch = qn1.state_dict()
+        if trial is not None:
+            trial.report(float(metric), step=int(epoch_idx))
+            if bool(getattr(trial, "should_prune", lambda: False)()):
+                raise RuntimeError("optuna_pruned")
         if metric > best_metric:
             best_metric = metric
             torch.save(best_state_for_epoch, run_dir / "best_model.pt")
-            logger.info("best_model.pt updated (val ndcg@10=%f)", float(best_metric))
+            logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric))
 
         if use_auto_warmup and phase == "warmup":
             if metric > best_metric_warmup:
                 best_metric_warmup = metric
                 epochs_since_improve_warmup = 0
                 torch.save(best_state_for_epoch, best_warmup_path)
-                logger.info("best_warmup_model.pt updated (val ndcg@10=%f)", float(best_metric_warmup))
+                logger.info("best_warmup_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_warmup))
             else:
                 epochs_since_improve_warmup += 1
                 logger.info(
-                    "warmup no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
+                    "warmup no improvement (val %s=%f best=%f) patience=%d/%d",
+                    str(metric_key),
                     float(metric),
                     float(best_metric_warmup),
                     int(epochs_since_improve_warmup),
@@ -416,7 +423,8 @@ def train_sa2c(
                 warmup_baseline_finalized = True
             if np.isfinite(warmup_best_metric_scalar) and warmup_best_metric_scalar > float("-inf"):
                 logger.info(
-                    "val ndcg@10=%f (delta_vs_warmup=%+.6f, warmup_best=%f)",
+                    "val %s=%f (delta_vs_warmup=%+.6f, warmup_best=%f)",
+                    str(metric_key),
                     float(metric),
                     float(metric - warmup_best_metric_scalar),
                     float(warmup_best_metric_scalar),
@@ -427,7 +435,8 @@ def train_sa2c(
             else:
                 epochs_since_improve_phase2 += 1
                 logger.info(
-                    "finetune no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
+                    "finetune no improvement (val %s=%f best=%f) patience=%d/%d",
+                    str(metric_key),
                     float(metric),
                     float(best_metric_phase2),
                     int(epochs_since_improve_phase2),
@@ -451,7 +460,8 @@ def train_sa2c(
                     warmup_baseline_finalized = True
                 if np.isfinite(warmup_best_metric_scalar) and warmup_best_metric_scalar > float("-inf"):
                     logger.info(
-                        "val ndcg@10=%f (delta_vs_warmup=%+.6f, warmup_best=%f)",
+                        "val %s=%f (delta_vs_warmup=%+.6f, warmup_best=%f)",
+                        str(metric_key),
                         float(metric),
                         float(metric - warmup_best_metric_scalar),
                         float(warmup_best_metric_scalar),
@@ -463,7 +473,8 @@ def train_sa2c(
                     else:
                         epochs_since_improve_phase2 += 1
                         logger.info(
-                            "finetune no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
+                            "finetune no improvement (val %s=%f best=%f) patience=%d/%d",
+                            str(metric_key),
                             float(metric),
                             float(best_metric_phase2),
                             int(epochs_since_improve_phase2),

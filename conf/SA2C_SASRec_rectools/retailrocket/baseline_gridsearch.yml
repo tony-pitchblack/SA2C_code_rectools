@@ -1,0 +1,44 @@
+gridsearch:
+  enable: true
+  epochs_per_run: 5
+  metric: "overall.ndcg@10"
+  direction: "maximize"
+  n_trials: 40
+  timeout_s: 0
+  n_jobs: 1
+  seed: 0
+  n_startup_trials: 10
+  pruner:
+    enable: true
+    n_warmup_epochs: 2
+  allow_early_stopping: false
+  max_steps_per_run: 0
+
+seed: 0
+dataset: retailrocket
+data: data
+enable_sa2c: false
+purchase_only: false
+
+batch_size_train: 600
+batch_size_val: 128
+num_workers_train: 4
+num_workers_val: 0
+device_id: 2
+
+# tuned
+lr: "float(1e-4, 1e-2, log=true)"
+hidden_factor: "categorical([64, 128, 256])"
+num_blocks: "categorical([1, 2, 4])"
+num_heads: "categorical([1, 2, 4])"
+dropout_rate: "float(0.0, 0.4)"
+
+# fixed
+epoch: 80
+early_stopping_ep: 10
+early_stopping_metric: ndcg@10
+max_steps: 0
+debug: false
+
+sampled_loss:
+  use: false

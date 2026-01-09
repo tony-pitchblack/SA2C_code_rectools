@@ -5,6 +5,20 @@ import yaml
 
 def default_config() -> dict:
     return {
+        "gridsearch": {
+            "enable": False,
+            "metric": "overall.ndcg@10",
+            "epochs_per_run": 5,
+            "direction": "maximize",
+            "n_trials": 20,
+            "timeout_s": 0,
+            "n_jobs": 1,
+            "seed": 0,
+            "n_startup_trials": 10,
+            "pruner": {"enable": True, "n_warmup_epochs": 2},
+            "allow_early_stopping": False,
+            "max_steps_per_run": 0,
+        },
         "seed": 0,
         "epoch": 50,
         "dataset": "retailrocket",
