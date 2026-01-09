@@ -501,7 +501,7 @@ def main():
     cfg = _apply_cli_overrides(cfg, args)
     if bool(cfg.get("use_rectoools_backbone", False)) or bool(cfg.get("use_rectools_backbone", False)):
         raise ValueError(
-            "This script is torch-only. For rectools backbone / per-position logits, run SA2C_SASRec_rectools.py."
+            "This script is torch-only. For rectools backbone / per-position logits, run `python -m SA2C_SASRec_rectools`."
         )
     if str(cfg.get("early_stopping_metric", "ndcg@10")) != "ndcg@10":
         raise ValueError("Only early_stopping_metric='ndcg@10' is supported.")
