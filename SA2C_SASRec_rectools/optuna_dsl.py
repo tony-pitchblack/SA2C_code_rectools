@@ -27,6 +27,11 @@ def _parse_call(expr: str) -> ast.Call:
 def _const(node: ast.AST) -> Any:
     if isinstance(node, ast.Constant):
         return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        v = _const(node.operand)
+        if isinstance(node.op, ast.UAdd):
+            return +v
+        return -v
     if isinstance(node, (ast.Tuple, ast.List)):
         return [_const(elt) for elt in node.elts]
     raise ValueError(f"Unsupported literal in optuna spec: {ast.dump(node)}")
