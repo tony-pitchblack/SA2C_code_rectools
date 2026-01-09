@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -111,6 +112,7 @@ def prepare_persrec_tc5_bert4rec_loo(
     seed: int,
     val_samples_num: int,
     test_samples_num: int,
+    limit_chunks_pct: float | None = None,
 ) -> tuple[str, Path, Path, Dataset, Dataset, Dataset]:
     use_sanity_subset = bool(dataset_cfg.get("use_sanity_subset", False))
     product_column = str(dataset_cfg.get("product_column", "product_id"))
@@ -122,6 +124,19 @@ def prepare_persrec_tc5_bert4rec_loo(
         hdfs_working_prefix=str(dataset_cfg.get("hdfs_working_prefix")),
         local_parquet_dir=local_parquet_dir,
     )
+
+    max_parts = None
+    if limit_chunks_pct is not None:
+        if not (0.0 < float(limit_chunks_pct) <= 1.0):
+            raise ValueError("limit_chunks_pct must be in (0, 1]")
+        source_files = [p for p in local_parquet_dir.iterdir() if p.is_file() and p.suffix == ".parquet"]
+        total = int(len(source_files))
+        if total <= 0:
+            raise FileNotFoundError(f"No parquet part files found in: {str(local_parquet_dir)}")
+        n_chunks = max(1, min(total, int(math.ceil(float(total) * float(limit_chunks_pct)))))
+        base_dir = base_dir / f"limit_chunks={int(n_chunks)}"
+        max_parts = int(n_chunks)
+
     mapped_parquet_dir = base_dir / "dataset_train_mapped.parquet"
     mapped_meta_path = base_dir / "dataset_train_mapped_meta.npz"
     ensure_mapped_parquet_cache(
@@ -129,6 +144,7 @@ def prepare_persrec_tc5_bert4rec_loo(
         mapped_parquet_dir=mapped_parquet_dir,
         mapped_meta_path=mapped_meta_path,
         product_column=product_column,
+        max_parts=max_parts,
     )
     df = load_persrec_tc5_parquet(mapped_parquet_dir, use_sanity_subset=use_sanity_subset)
 

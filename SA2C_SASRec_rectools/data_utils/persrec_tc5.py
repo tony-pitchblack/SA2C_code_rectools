@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import subprocess
 import time
@@ -64,7 +65,12 @@ def _list_parquet_part_files(parquet_dir: Path) -> list[Path]:
     raise FileNotFoundError(str(parquet_dir))
 
 
-def load_persrec_tc5_parquet(local_parquet_dir: Path, *, use_sanity_subset: bool) -> pd.DataFrame:
+def load_persrec_tc5_parquet(
+    local_parquet_dir: Path,
+    *,
+    use_sanity_subset: bool,
+    max_parts: int | None = None,
+) -> pd.DataFrame:
     logger = logging.getLogger(__name__)
     local_parquet_dir = Path(local_parquet_dir)
     if not local_parquet_dir.exists():
@@ -74,6 +80,11 @@ def load_persrec_tc5_parquet(local_parquet_dir: Path, *, use_sanity_subset: bool
         raise FileNotFoundError(f"No parquet part files found in: {str(local_parquet_dir)}")
     if bool(use_sanity_subset):
         files = [files[0]]
+    elif max_parts is not None:
+        m = int(max_parts)
+        if m <= 0:
+            raise ValueError("max_parts must be >= 1")
+        files = files[:m]
     t0 = time.perf_counter()
     dfs = [pd.read_parquet(str(p)) for p in files]
     df = pd.concat(dfs, axis=0, ignore_index=True)
@@ -87,6 +98,7 @@ def ensure_mapped_parquet_cache(
     mapped_parquet_dir: Path,
     mapped_meta_path: Path,
     product_column: str,
+    max_parts: int | None = None,
 ) -> None:
     source_parquet_dir = Path(source_parquet_dir)
     mapped_parquet_dir = Path(mapped_parquet_dir)
@@ -97,6 +109,11 @@ def ensure_mapped_parquet_cache(
     source_files = _list_parquet_part_files(source_parquet_dir)
     if not source_files:
         raise FileNotFoundError(f"No parquet part files found in: {str(source_parquet_dir)}")
+    if max_parts is not None:
+        m = int(max_parts)
+        if m <= 0:
+            raise ValueError("max_parts must be >= 1")
+        source_files = source_files[:m]
 
     mapped_parquet_dir.mkdir(parents=True, exist_ok=True)
     mapped_meta_path.parent.mkdir(parents=True, exist_ok=True)
@@ -262,6 +279,7 @@ def prepare_persrec_tc5(
     dataset_name: str,
     dataset_cfg: dict,
     seed: int,
+    limit_chunks_pct: float | None = None,
 ) -> tuple[str, Path, Path, Dataset, Dataset, Dataset]:
     logger = logging.getLogger(__name__)
     use_sanity_subset = bool(dataset_cfg.get("use_sanity_subset", False))
@@ -276,6 +294,18 @@ def prepare_persrec_tc5(
         hdfs_working_prefix=str(dataset_cfg.get("hdfs_working_prefix")),
         local_parquet_dir=local_parquet_dir,
     )
+
+    n_chunks = None
+    if limit_chunks_pct is not None:
+        if not (0.0 < float(limit_chunks_pct) <= 1.0):
+            raise ValueError("limit_chunks_pct must be in (0, 1]")
+        total = int(len(_list_parquet_part_files(local_parquet_dir)))
+        if total <= 0:
+            raise FileNotFoundError(f"No parquet part files found in: {str(local_parquet_dir)}")
+        n_chunks = max(1, min(total, int(math.ceil(float(total) * float(limit_chunks_pct)))))
+        base_dir = base_dir / f"limit_chunks={int(n_chunks)}"
+        logger.info("persrec_tc5: limit_chunks_pct=%s -> n_chunks=%d data_dir=%s", str(limit_chunks_pct), int(n_chunks), str(base_dir))
+
     mapped_parquet_dir = base_dir / "dataset_train_mapped.parquet"
     mapped_meta_path = base_dir / "dataset_train_mapped_meta.npz"
     ensure_mapped_parquet_cache(
@@ -283,6 +313,7 @@ def prepare_persrec_tc5(
         mapped_parquet_dir=mapped_parquet_dir,
         mapped_meta_path=mapped_meta_path,
         product_column=product_column,
+        max_parts=n_chunks,
     )
 
     df = load_persrec_tc5_parquet(mapped_parquet_dir, use_sanity_subset=use_sanity_subset)

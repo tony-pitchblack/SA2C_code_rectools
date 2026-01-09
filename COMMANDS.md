@@ -56,9 +56,8 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/b
 
 ## Optuna gridsearch (rectools) — persrec_tc5 (bert4rec_eval)
 
-- `limit_train_batches` / `limit_val_batches` / `limit_test_batches` can be:
-  - float fraction in (0, 1] (e.g. `0.1`), or
-  - int cap `>= 1` (e.g. `200`)
+- Use `limit_chunks_pct` (float in (0, 1]) to load only the first N parquet chunks for persrec_tc5 and cache derived artifacts under:
+  - `data/persrec_tc5_<calc_date>/limit_chunks=<n_chunks>/`
 
 ```bash
 source .venv/bin/activate

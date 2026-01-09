@@ -36,9 +36,7 @@ num_workers_train: 0
 num_workers_val: 0
 device_id: 5
 
-limit_train_batches: 0.1
-limit_val_batches: 0.2
-limit_test_batches: 0.2
+limit_chunks_pct: 0.2
 
 # tuned
 lr: "float(1e-4, 1e-2, log=true)"
