@@ -1064,29 +1064,18 @@ def main():
                             epochs_since_improve_phase2 = 0
                         else:
                             epochs_since_improve_phase2 += 1
-                        logger.info(
-                            "finetune no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
-                            float(metric),
-                            float(best_metric_phase2),
-                            int(epochs_since_improve_phase2),
-                            int(early_patience),
-                        )
-                        if early_patience > 0 and epochs_since_improve_phase2 >= early_patience:
-                            logger.info("finetune early stopping triggered")
-                            break
+                            logger.info(
+                                "finetune no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
+                                float(metric),
+                                float(best_metric_phase2),
+                                int(epochs_since_improve_phase2),
+                                int(early_patience),
+                            )
+                            if early_patience > 0 and epochs_since_improve_phase2 >= early_patience:
+                                logger.info("finetune early stopping triggered")
+                                break
                 else:
                     warmup_best_metric_scalar = float(max(warmup_best_metric_scalar, metric))
-
-                logger.info(
-                    "no improvement (val ndcg@10=%f best=%f) patience=%d/%d",
-                    float(metric),
-                    float(best_metric),
-                    int(epochs_since_improve),
-                    int(early_patience),
-                )
-                if early_patience > 0 and epochs_since_improve >= early_patience:
-                    logger.info("early stopping triggered")
-                    break
             if stop_training:
                 logger.info("max_steps reached; stopping")
                 break

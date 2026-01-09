@@ -21,8 +21,9 @@ python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchas
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/baseline.yml --smoke-cpu
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/default.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml
-python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/default_sampled_loss.yml
+python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/default_auto_warmup.yml
+python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_auto_warmup.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only.yaml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only_ndcg.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml --smoke-cpu --max_steps 64
@@ -36,8 +37,9 @@ python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_o
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/baseline.yml --smoke-cpu
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/default.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml
-python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/default_sampled_loss.yml
+python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/default_auto_warmup.yml
+python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_auto_warmup.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only.yaml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only_ndcg.yml
 python SA2C_SASRec_rectools.py --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml --smoke-cpu --max_steps 64
