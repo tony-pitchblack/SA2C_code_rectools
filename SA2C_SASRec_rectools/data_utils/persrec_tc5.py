@@ -43,13 +43,13 @@ def ensure_local_parquet_cache(*, hdfs_working_prefix: str, local_parquet_dir: P
     logger = logging.getLogger(__name__)
     local_parquet_dir = Path(local_parquet_dir)
     if local_parquet_dir.exists() and any(local_parquet_dir.iterdir()):
-        logger.info("persrec_tc5: parquet cache found at %s", str(local_parquet_dir))
+        logger.info("persrec_tc5: using raw parquet cache at %s", str(local_parquet_dir))
         return
     local_parquet_dir.parent.mkdir(parents=True, exist_ok=True)
     src = str(Path(hdfs_working_prefix) / "training" / "dataset_train.parquet")
     dst = str(local_parquet_dir)
     t0 = time.perf_counter()
-    logger.info("persrec_tc5: parquet cache missing -> downloading to %s", str(local_parquet_dir))
+    logger.info("persrec_tc5: raw parquet cache missing at %s -> downloading from %s", str(local_parquet_dir), str(src))
     hdfs_get(src, dst)
     logger.info("persrec_tc5: hdfs download done in %.3fs", float(time.perf_counter() - t0))
     if not local_parquet_dir.exists():
@@ -100,11 +100,24 @@ def ensure_mapped_parquet_cache(
     product_column: str,
     max_parts: int | None = None,
 ) -> None:
+    logger = logging.getLogger(__name__)
     source_parquet_dir = Path(source_parquet_dir)
     mapped_parquet_dir = Path(mapped_parquet_dir)
     mapped_meta_path = Path(mapped_meta_path)
     if mapped_parquet_dir.exists() and any(mapped_parquet_dir.iterdir()) and mapped_meta_path.exists():
+        logger.info(
+            "persrec_tc5: using mapped parquet cache at %s (meta=%s)",
+            str(mapped_parquet_dir),
+            str(mapped_meta_path),
+        )
         return
+    logger.info(
+        "persrec_tc5: mapped parquet cache missing/incomplete at %s (meta=%s) -> building from %s (max_parts=%s)",
+        str(mapped_parquet_dir),
+        str(mapped_meta_path),
+        str(source_parquet_dir),
+        str(max_parts),
+    )
 
     source_files = _list_parquet_part_files(source_parquet_dir)
     if not source_files:
@@ -120,6 +133,7 @@ def ensure_mapped_parquet_cache(
 
     item2id: dict[int, int] = {}
     counts_list: list[int] = []
+    t0 = time.perf_counter()
     for part_path in tqdm(source_files, desc="persrec_tc5 map parquet", unit="part", dynamic_ncols=True, leave=False):
         df_part = pd.read_parquet(str(part_path))
         if product_column not in df_part.columns:
@@ -145,6 +159,13 @@ def ensure_mapped_parquet_cache(
         df_part.to_parquet(str(mapped_parquet_dir / part_path.name), index=False)
 
     np.savez(str(mapped_meta_path), counts=np.asarray(counts_list, dtype=np.int64))
+    logger.info(
+        "persrec_tc5: mapped parquet built parts=%d items=%d in %.3fs (%s)",
+        int(len(source_files)),
+        int(len(counts_list)),
+        float(time.perf_counter() - t0),
+        str(mapped_parquet_dir),
+    )
 
 
 def prepare_persrec_tc5_from_df(
@@ -308,6 +329,12 @@ def prepare_persrec_tc5(
 
     mapped_parquet_dir = base_dir / "dataset_train_mapped.parquet"
     mapped_meta_path = base_dir / "dataset_train_mapped_meta.npz"
+    logger.info(
+        "persrec_tc5: mapped parquet dir=%s (meta=%s) source=%s",
+        str(mapped_parquet_dir),
+        str(mapped_meta_path),
+        str(local_parquet_dir),
+    )
     ensure_mapped_parquet_cache(
         source_parquet_dir=local_parquet_dir,
         mapped_parquet_dir=mapped_parquet_dir,
