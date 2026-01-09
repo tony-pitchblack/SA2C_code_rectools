@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import logging
 import random
 import time
@@ -77,13 +78,73 @@ def main():
         test_samples_num = min(int(test_samples_num), int(cap))
     eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
 
-    limit_train_batches_cfg = cfg.get("limit_train_batches", None)
-    limit_train_batches = None if limit_train_batches_cfg in (None, 0, 0.0, "0", "0.0") else float(limit_train_batches_cfg)
-    if limit_train_batches is not None:
-        if not (0.0 < float(limit_train_batches) < 1.0):
-            raise ValueError("limit_train_batches must be a float fraction in (0, 1)")
-        if bool(sanity):
-            raise ValueError("limit_train_batches cannot be used together with --sanity")
+    def _parse_limit_batches(key: str):
+        v = cfg.get(key, None)
+        if v is None or v in (0, 0.0, "0", "0.0"):
+            return None
+        if isinstance(v, bool):
+            raise ValueError(f"{key} must be float fraction (0,1] or int >= 1")
+        if isinstance(v, int):
+            out = int(v)
+        elif isinstance(v, float):
+            out = float(v)
+        elif isinstance(v, str):
+            s = v.strip()
+            if not s or s.lower() in {"none", "null"}:
+                return None
+            try:
+                out = float(s) if (("." in s) or ("e" in s.lower())) else int(s)
+            except ValueError as e:
+                raise ValueError(f"{key} must be float fraction (0,1] or int >= 1") from e
+        else:
+            raise ValueError(f"{key} must be float fraction (0,1] or int >= 1")
+        if isinstance(out, float):
+            if not (0.0 < float(out) <= 1.0):
+                raise ValueError(f"{key} float must be a fraction in (0, 1]")
+        elif isinstance(out, int):
+            if int(out) < 1:
+                raise ValueError(f"{key} int must be >= 1")
+        else:
+            raise ValueError(f"{key} must be float fraction (0,1] or int >= 1")
+        return out
+
+    limit_train_batches = _parse_limit_batches("limit_train_batches")
+    limit_val_batches = _parse_limit_batches("limit_val_batches")
+    limit_test_batches = _parse_limit_batches("limit_test_batches")
+
+    class _LimitedLoader:
+        def __init__(self, dl, n_batches: int):
+            self._dl = dl
+            self._n = int(n_batches)
+
+        def __iter__(self):
+            return itertools.islice(iter(self._dl), int(self._n))
+
+        def __len__(self):
+            return int(self._n)
+
+    def _apply_limit(dl, limit, *, key: str):
+        if limit is None:
+            return dl
+        try:
+            base_len = int(len(dl))
+        except Exception:
+            base_len = None
+
+        if isinstance(limit, float):
+            if base_len is None:
+                raise ValueError(f"{key} as float requires a loader with __len__")
+            n = 0 if base_len <= 0 else max(1, int(float(base_len) * float(limit)))
+        else:
+            cap = int(limit)
+            if base_len is None:
+                n = cap
+            else:
+                n = 0 if base_len <= 0 else max(1, min(int(base_len), int(cap)))
+
+        if base_len is not None and n >= int(base_len):
+            return dl
+        return _LimitedLoader(dl, n)
 
     num_epochs = int(cfg.get("epoch", 50))
     max_steps = int(cfg.get("max_steps", 0))
@@ -184,10 +245,11 @@ def main():
     num_sessions = int(len(train_ds))
     num_batches = int(num_sessions / train_batch_size)
     if limit_train_batches is not None:
-        if not persrec_tc5:
-            raise ValueError("limit_train_batches is supported only for persrec_tc5 dataset configs")
         if num_batches > 0:
-            num_batches = max(1, min(int(num_batches), int(float(num_batches) * float(limit_train_batches))))
+            if isinstance(limit_train_batches, float):
+                num_batches = max(1, int(float(num_batches) * float(limit_train_batches)))
+            else:
+                num_batches = max(1, min(int(num_batches), int(limit_train_batches)))
     if num_batches <= 0:
         logger.warning(
             "num_batches=%d (num_sessions=%d, train_batch_size=%d) -> no training batches will run; metrics will be static",
@@ -209,6 +271,7 @@ def main():
         pad_item=item_num,
         shuffle=False,
     )
+    val_dl = _apply_limit(val_dl, limit_val_batches, key="limit_val_batches")
     val_dl_s = time.perf_counter() - t0
 
     if (not persrec_tc5) and (not use_bert4rec_loo):
@@ -224,6 +287,7 @@ def main():
         pad_item=item_num,
         shuffle=False,
     )
+    test_dl = _apply_limit(test_dl, limit_test_batches, key="limit_test_batches")
     test_dl_s = time.perf_counter() - t0
 
     gs_cfg = cfg.get("gridsearch") or {}

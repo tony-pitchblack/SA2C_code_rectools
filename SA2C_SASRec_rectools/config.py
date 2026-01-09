@@ -25,6 +25,8 @@ def default_config() -> dict:
         "data": "data",
         "sanity": False,
         "limit_train_batches": None,
+        "limit_val_batches": None,
+        "limit_test_batches": None,
         "purchase_only": False,
         "reward_fn": "click_buy",
         "enable_sa2c": True,
