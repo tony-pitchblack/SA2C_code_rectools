@@ -54,6 +54,18 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/base
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline_gridsearch.yml
 ```
 
+## Optuna gridsearch (rectools) — persrec_tc5 (bert4rec_eval)
+
+- `limit_train_batches` / `limit_val_batches` / `limit_test_batches` can be:
+  - float fraction in (0, 1] (e.g. `0.1`), or
+  - int cap `>= 1` (e.g. `200`)
+
+```bash
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_gridsearch.yml
+```
+
 ## persrec_tc5 (BERT4Rec parquet format) — rectools
 
 - Expects parquet at `data/persrec_tc5_<calc_date>/dataset_train.parquet/` (directory of parquet part-files).
@@ -64,6 +76,10 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_20
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/baseline.yml --sanity
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline.yml --sanity
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default.yml --sanity
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup.yml --sanity
 ```
 
 - Regular artifacts (created if missing):
