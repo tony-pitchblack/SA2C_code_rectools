@@ -10,8 +10,8 @@ from torch.utils.data import Dataset
 from .persrec_tc5 import (
     ensure_data_statis,
     ensure_local_parquet_cache,
+    ensure_mapped_parquet_cache,
     ensure_pop_dict,
-    load_or_build_item_vocab_and_sequences,
     load_persrec_tc5_parquet,
 )
 from .sessions import SessionDatasetFromDF
@@ -122,17 +122,42 @@ def prepare_persrec_tc5_bert4rec_loo(
         hdfs_working_prefix=str(dataset_cfg.get("hdfs_working_prefix")),
         local_parquet_dir=local_parquet_dir,
     )
-    df = load_persrec_tc5_parquet(local_parquet_dir, use_sanity_subset=use_sanity_subset)
+    mapped_parquet_dir = base_dir / "dataset_train_mapped.parquet"
+    mapped_meta_path = base_dir / "dataset_train_mapped_meta.npz"
+    ensure_mapped_parquet_cache(
+        source_parquet_dir=local_parquet_dir,
+        mapped_parquet_dir=mapped_parquet_dir,
+        mapped_meta_path=mapped_meta_path,
+        product_column=product_column,
+    )
+    df = load_persrec_tc5_parquet(mapped_parquet_dir, use_sanity_subset=use_sanity_subset)
 
-    vocab_path = base_dir / ("built_vocabulary_sanity.npz" if use_sanity_subset else "built_vocabulary.pkl")
     data_statis_path = base_dir / ("data_statis_sanity.df" if use_sanity_subset else "data_statis.df")
     pop_dict_path = base_dir / ("pop_dict_sanity.txt" if use_sanity_subset else "pop_dict.txt")
 
-    seqs, item2id, counts = load_or_build_item_vocab_and_sequences(
-        df, product_column=product_column, vocab_path=vocab_path, use_sanity_subset=use_sanity_subset
-    )
-    ensure_data_statis(data_statis_path, state_size=int(state_size_cfg), item_num=int(len(item2id)))
-    ensure_pop_dict(pop_dict_path, counts=counts)
+    seqs: list[list[int]] = []
+    for seq in df[product_column].tolist():
+        if seq is None:
+            seqs.append([])
+        else:
+            seqs.append([int(x) for x in list(seq)])
+
+    counts = None
+    if mapped_meta_path.exists():
+        z = np.load(str(mapped_meta_path))
+        counts = np.asarray(z["counts"], dtype=np.int64)
+    if counts is None:
+        counts_list: list[int] = []
+        for s in seqs:
+            for idx in s:
+                i = int(idx)
+                if i >= int(len(counts_list)):
+                    counts_list.extend([0] * (i + 1 - int(len(counts_list))))
+                counts_list[i] += 1
+        counts = np.asarray(counts_list, dtype=np.int64)
+
+    ensure_data_statis(data_statis_path, state_size=int(state_size_cfg), item_num=int(counts.shape[0]))
+    ensure_pop_dict(pop_dict_path, counts=np.asarray(counts, dtype=np.int64))
 
     eligible = np.asarray([i for i, s in enumerate(seqs) if len(s) >= 3], dtype=np.int64)
     splits_path = base_dir / "bert4rec_eval" / (

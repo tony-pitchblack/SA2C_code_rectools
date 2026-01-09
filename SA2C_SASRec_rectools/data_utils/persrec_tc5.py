@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import pickle
 import shutil
 import subprocess
 import time
@@ -56,27 +55,79 @@ def ensure_local_parquet_cache(*, hdfs_working_prefix: str, local_parquet_dir: P
         raise RuntimeError(f"HDFS download completed but local path does not exist: {str(local_parquet_dir)}")
 
 
+def _list_parquet_part_files(parquet_dir: Path) -> list[Path]:
+    parquet_dir = Path(parquet_dir)
+    if parquet_dir.is_file() and parquet_dir.suffix == ".parquet":
+        return [parquet_dir]
+    if parquet_dir.is_dir():
+        return sorted([p for p in parquet_dir.iterdir() if p.is_file() and p.suffix == ".parquet"], key=lambda p: p.name)
+    raise FileNotFoundError(str(parquet_dir))
+
+
 def load_persrec_tc5_parquet(local_parquet_dir: Path, *, use_sanity_subset: bool) -> pd.DataFrame:
     logger = logging.getLogger(__name__)
     local_parquet_dir = Path(local_parquet_dir)
     if not local_parquet_dir.exists():
         raise FileNotFoundError(f"Missing parquet directory: {str(local_parquet_dir)}")
-    if not bool(use_sanity_subset):
-        t0 = time.perf_counter()
-        logger.info("persrec_tc5: loading parquet dataset (all parts) from %s", str(local_parquet_dir))
-        df = pd.read_parquet(str(local_parquet_dir))
-        logger.info("persrec_tc5: parquet loaded rows=%d in %.3fs", int(len(df)), float(time.perf_counter() - t0))
-        return df
-    files = sorted(
-        [p for p in local_parquet_dir.iterdir() if p.is_file() and p.suffix == ".parquet"], key=lambda p: p.name
-    )
+    files = _list_parquet_part_files(local_parquet_dir)
     if not files:
-        raise FileNotFoundError(f"Sanity subset requested, but no parquet part files found in: {str(local_parquet_dir)}")
+        raise FileNotFoundError(f"No parquet part files found in: {str(local_parquet_dir)}")
+    if bool(use_sanity_subset):
+        files = [files[0]]
     t0 = time.perf_counter()
-    logger.info("persrec_tc5: sanity subset -> loading parquet part %s", str(files[0]))
-    df = pd.read_parquet(str(files[0]))
+    dfs = [pd.read_parquet(str(p)) for p in files]
+    df = pd.concat(dfs, axis=0, ignore_index=True)
     logger.info("persrec_tc5: parquet loaded rows=%d in %.3fs", int(len(df)), float(time.perf_counter() - t0))
     return df
+
+
+def ensure_mapped_parquet_cache(
+    *,
+    source_parquet_dir: Path,
+    mapped_parquet_dir: Path,
+    mapped_meta_path: Path,
+    product_column: str,
+) -> None:
+    source_parquet_dir = Path(source_parquet_dir)
+    mapped_parquet_dir = Path(mapped_parquet_dir)
+    mapped_meta_path = Path(mapped_meta_path)
+    if mapped_parquet_dir.exists() and any(mapped_parquet_dir.iterdir()) and mapped_meta_path.exists():
+        return
+
+    source_files = _list_parquet_part_files(source_parquet_dir)
+    if not source_files:
+        raise FileNotFoundError(f"No parquet part files found in: {str(source_parquet_dir)}")
+
+    mapped_parquet_dir.mkdir(parents=True, exist_ok=True)
+    mapped_meta_path.parent.mkdir(parents=True, exist_ok=True)
+
+    item2id: dict[int, int] = {}
+    counts_list: list[int] = []
+    for part_path in tqdm(source_files, desc="persrec_tc5 map parquet", unit="part", dynamic_ncols=True, leave=False):
+        df_part = pd.read_parquet(str(part_path))
+        if product_column not in df_part.columns:
+            raise KeyError(f"Missing product column '{product_column}' in parquet part {str(part_path)}")
+        mapped_seqs: list[list[int]] = []
+        for seq in df_part[product_column].tolist():
+            if seq is None:
+                mapped_seqs.append([])
+                continue
+            out: list[int] = []
+            for x in list(seq):
+                raw = int(x)
+                idx = item2id.get(raw)
+                if idx is None:
+                    idx = int(len(item2id))
+                    item2id[raw] = idx
+                    counts_list.append(0)
+                out.append(int(idx))
+                counts_list[int(idx)] += 1
+            mapped_seqs.append(out)
+        df_part = df_part.copy()
+        df_part[product_column] = mapped_seqs
+        df_part.to_parquet(str(mapped_parquet_dir / part_path.name), index=False)
+
+    np.savez(str(mapped_meta_path), counts=np.asarray(counts_list, dtype=np.int64))
 
 
 def prepare_persrec_tc5_from_df(
@@ -88,6 +139,7 @@ def prepare_persrec_tc5_from_df(
     state_size: int,
     use_sanity_subset: bool,
     seed: int,
+    mapped_counts: np.ndarray | None,
 ) -> tuple[str, Path, Path, Dataset, Dataset, Dataset]:
     logger = logging.getLogger(__name__)
     if user_column not in df.columns:
@@ -96,18 +148,31 @@ def prepare_persrec_tc5_from_df(
         raise KeyError(f"Missing product column '{product_column}' in parquet dataset")
 
     base_dir = Path(base_dir)
-    vocab_path = base_dir / ("built_vocabulary_sanity.npz" if use_sanity_subset else "built_vocabulary.pkl")
     splits_path = base_dir / ("data_splits_sanity.npz" if use_sanity_subset else "data_splits.npz")
     data_statis_path = base_dir / ("data_statis_sanity.df" if use_sanity_subset else "data_statis.df")
     pop_dict_path = base_dir / ("pop_dict_sanity.txt" if use_sanity_subset else "pop_dict.txt")
 
-    seqs, item2id, counts = load_or_build_item_vocab_and_sequences(
-        df, product_column=product_column, vocab_path=vocab_path, use_sanity_subset=use_sanity_subset
-    )
-    item_num_local = int(len(item2id))
+    seqs: list[list[int]] = []
+    for seq in df[product_column].tolist():
+        if seq is None:
+            seqs.append([])
+        else:
+            seqs.append([int(x) for x in list(seq)])
+
+    if mapped_counts is None:
+        counts_list: list[int] = []
+        for s in seqs:
+            for idx in s:
+                i = int(idx)
+                if i >= int(len(counts_list)):
+                    counts_list.extend([0] * (i + 1 - int(len(counts_list))))
+                counts_list[i] += 1
+        mapped_counts = np.asarray(counts_list, dtype=np.int64)
+
+    item_num_local = int(np.asarray(mapped_counts).shape[0])
     logger.info("persrec_tc5: item_num=%d", int(item_num_local))
     ensure_data_statis(data_statis_path, state_size=int(state_size), item_num=int(item_num_local))
-    ensure_pop_dict(pop_dict_path, counts=counts)
+    ensure_pop_dict(pop_dict_path, counts=np.asarray(mapped_counts, dtype=np.int64))
     train_idx, val_idx, test_idx = load_or_build_row_splits(n_rows=int(len(seqs)), splits_path=splits_path, seed=int(seed))
 
     data_directory = str(base_dir)
@@ -117,102 +182,6 @@ def prepare_persrec_tc5_from_df(
     test_ds = PersrecTC5UserSeqDataset(seqs, test_idx)
     logger.info("persrec_tc5: dataset objects ready in %.3fs", float(time.perf_counter() - t0))
     return data_directory, data_statis_path, pop_dict_path, train_ds, val_ds, test_ds
-
-
-def load_vocab_any(path: Path, *, is_sanity: bool) -> dict[int, int]:
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(str(path))
-    if bool(is_sanity):
-        z = np.load(str(path))
-        raw_ids = z["raw_ids"]
-        return {int(raw): int(i) for i, raw in enumerate(raw_ids.tolist())}
-    with open(path, "rb") as f:
-        obj = pickle.load(f)
-    if not isinstance(obj, dict):
-        raise ValueError(f"Expected dict in vocab file, got {type(obj)}")
-    return {int(k): int(v) for k, v in obj.items()}
-
-
-def save_vocab_any(path: Path, item2id: dict[int, int], *, is_sanity: bool):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if bool(is_sanity):
-        raw_ids = np.empty((len(item2id),), dtype=np.int64)
-        for raw, idx in item2id.items():
-            raw_ids[int(idx)] = int(raw)
-        np.savez(str(path), raw_ids=raw_ids)
-        return
-    with open(path, "wb") as f:
-        pickle.dump(item2id, f)
-
-
-def load_or_build_item_vocab_and_sequences(
-    df: pd.DataFrame,
-    *,
-    product_column: str,
-    vocab_path: Path,
-    use_sanity_subset: bool,
-) -> tuple[list[list[int]], dict[int, int], np.ndarray]:
-    logger = logging.getLogger(__name__)
-    is_sanity = bool(use_sanity_subset)
-    t0 = time.perf_counter()
-    if Path(vocab_path).exists():
-        logger.info("persrec_tc5: loading vocab from %s", str(vocab_path))
-        item2id = load_vocab_any(vocab_path, is_sanity=is_sanity)
-        counts = np.zeros((len(item2id),), dtype=np.int64)
-        seqs = []
-        for seq in tqdm(
-            df[product_column].tolist(), desc="persrec_tc5 remap", unit="row", dynamic_ncols=True, leave=False
-        ):
-            if seq is None:
-                seqs.append([])
-                continue
-            remapped = []
-            for x in list(seq):
-                raw = int(x)
-                if raw not in item2id:
-                    raise ValueError(f"Unknown product_id={raw} not in existing vocabulary {str(vocab_path)}")
-                idx = int(item2id[raw])
-                remapped.append(idx)
-                counts[idx] += 1
-            seqs.append(remapped)
-        logger.info(
-            "persrec_tc5: remapped sequences rows=%d vocab=%d in %.3fs",
-            int(len(seqs)),
-            int(len(item2id)),
-            float(time.perf_counter() - t0),
-        )
-        return seqs, item2id, counts
-
-    logger.info("persrec_tc5: building vocab at %s", str(vocab_path))
-    item2id: dict[int, int] = {}
-    counts_list: list[int] = []
-    seqs = []
-    for seq in tqdm(df[product_column].tolist(), desc="persrec_tc5 vocab", unit="row", dynamic_ncols=True, leave=False):
-        if seq is None:
-            seqs.append([])
-            continue
-        remapped = []
-        for x in list(seq):
-            raw = int(x)
-            idx = item2id.get(raw)
-            if idx is None:
-                idx = int(len(item2id))
-                item2id[raw] = idx
-                counts_list.append(0)
-            remapped.append(idx)
-            counts_list[idx] += 1
-        seqs.append(remapped)
-    counts = np.asarray(counts_list, dtype=np.int64)
-    save_vocab_any(vocab_path, item2id, is_sanity=is_sanity)
-    logger.info(
-        "persrec_tc5: built vocab rows=%d vocab=%d in %.3fs",
-        int(len(seqs)),
-        int(len(item2id)),
-        float(time.perf_counter() - t0),
-    )
-    return seqs, item2id, counts
 
 
 def load_or_build_row_splits(*, n_rows: int, splits_path: Path, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -307,8 +276,20 @@ def prepare_persrec_tc5(
         hdfs_working_prefix=str(dataset_cfg.get("hdfs_working_prefix")),
         local_parquet_dir=local_parquet_dir,
     )
-    df = load_persrec_tc5_parquet(local_parquet_dir, use_sanity_subset=use_sanity_subset)
-    logger.info("persrec_tc5: parquet columns=%s", ",".join([str(c) for c in df.columns.tolist()]))
+    mapped_parquet_dir = base_dir / "dataset_train_mapped.parquet"
+    mapped_meta_path = base_dir / "dataset_train_mapped_meta.npz"
+    ensure_mapped_parquet_cache(
+        source_parquet_dir=local_parquet_dir,
+        mapped_parquet_dir=mapped_parquet_dir,
+        mapped_meta_path=mapped_meta_path,
+        product_column=product_column,
+    )
+
+    df = load_persrec_tc5_parquet(mapped_parquet_dir, use_sanity_subset=use_sanity_subset)
+    mapped_counts = None
+    if mapped_meta_path.exists():
+        z = np.load(str(mapped_meta_path))
+        mapped_counts = np.asarray(z["counts"], dtype=np.int64)
     return prepare_persrec_tc5_from_df(
         df,
         base_dir=base_dir,
@@ -317,6 +298,7 @@ def prepare_persrec_tc5(
         state_size=int(state_size_cfg),
         use_sanity_subset=use_sanity_subset,
         seed=int(seed),
+        mapped_counts=mapped_counts,
     )
 
 
@@ -325,8 +307,8 @@ __all__ = [
     "prepare_persrec_tc5_from_df",
     "PersrecTC5UserSeqDataset",
     "ensure_local_parquet_cache",
+    "ensure_mapped_parquet_cache",
     "load_persrec_tc5_parquet",
-    "load_or_build_item_vocab_and_sequences",
     "load_or_build_row_splits",
     "ensure_data_statis",
     "ensure_pop_dict",
