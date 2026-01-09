@@ -1,6 +1,7 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
-from typing import Optional
 
 
 class PointWiseFeedForward(nn.Module):
