@@ -24,6 +24,7 @@ def default_config() -> dict:
         "dataset": "retailrocket",
         "data": "data",
         "sanity": False,
+        "limit_train_batches": None,
         "purchase_only": False,
         "reward_fn": "click_buy",
         "enable_sa2c": True,
