@@ -24,6 +24,17 @@ from .training.baseline import train_baseline
 from .training.sa2c import train_sa2c
 
 
+def _infer_eval_scheme_from_config_path(config_path: str, *, dataset_name: str) -> str | None:
+    p = Path(config_path)
+    parent_parts = list(p.parent.parts)
+    for i in range(len(parent_parts) - 1, -1, -1):
+        if parent_parts[i] == str(dataset_name):
+            if i < len(parent_parts) - 1:
+                return str(parent_parts[i + 1])
+            return None
+    return None
+
+
 def main():
     args = parse_args()
     config_path = args.config
@@ -51,7 +62,8 @@ def main():
     config_name = Path(config_path).stem
     if bool(getattr(args, "sanity", False)):
         config_name = f"{config_name}_sanity"
-    run_dir = make_run_dir(dataset_name, config_name)
+    eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
+    run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
     configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
     dump_config(cfg, run_dir)
 
