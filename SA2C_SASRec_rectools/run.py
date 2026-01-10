@@ -37,6 +37,7 @@ def _infer_eval_scheme_from_config_path(config_path: str, *, dataset_name: str) 
 
 def main():
     args = parse_args()
+    eval_only = bool(getattr(args, "eval_only", False))
     config_path = args.config
     cfg = load_config(config_path)
     cfg = apply_cli_overrides(cfg, args)
@@ -255,6 +256,105 @@ def main():
     test_dl_s = time.perf_counter() - t0
 
     gs_cfg = cfg.get("gridsearch") or {}
+    if eval_only:
+        best_path = run_dir / "best_model.pt"
+        if not best_path.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {best_path}")
+
+        if enable_sa2c:
+            best_model = SASRecQNetworkRectools(
+                item_num=item_num,
+                state_size=state_size,
+                hidden_size=int(cfg.get("hidden_factor", 64)),
+                num_heads=int(cfg.get("num_heads", 1)),
+                num_blocks=int(cfg.get("num_blocks", 1)),
+                dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            ).to(device)
+        else:
+            best_model = SASRecBaselineRectools(
+                item_num=item_num,
+                state_size=state_size,
+                hidden_size=int(cfg.get("hidden_factor", 64)),
+                num_heads=int(cfg.get("num_heads", 1)),
+                num_blocks=int(cfg.get("num_blocks", 1)),
+                dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            ).to(device)
+        best_model.load_state_dict(torch.load(best_path, map_location=device))
+
+        val_best = eval_fn(
+            best_model,
+            val_dl,
+            reward_click,
+            reward_buy,
+            device,
+            debug=bool(cfg.get("debug", False)),
+            split="val(best)",
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+        )
+        test_best = eval_fn(
+            best_model,
+            test_dl,
+            reward_click,
+            reward_buy,
+            device,
+            debug=bool(cfg.get("debug", False)),
+            split="test(best)",
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+        )
+
+        val_warmup = None
+        test_warmup = None
+        if enable_sa2c:
+            warmup_path = run_dir / "best_warmup_model.pt"
+            if warmup_path.exists():
+                warmup_model = SASRecQNetworkRectools(
+                    item_num=item_num,
+                    state_size=state_size,
+                    hidden_size=int(cfg.get("hidden_factor", 64)),
+                    num_heads=int(cfg.get("num_heads", 1)),
+                    num_blocks=int(cfg.get("num_blocks", 1)),
+                    dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                ).to(device)
+                warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
+                val_warmup = eval_fn(
+                    warmup_model,
+                    val_dl,
+                    reward_click,
+                    reward_buy,
+                    device,
+                    debug=bool(cfg.get("debug", False)),
+                    split="val(best_warmup)",
+                    state_size=state_size,
+                    item_num=item_num,
+                    purchase_only=purchase_only,
+                )
+                test_warmup = eval_fn(
+                    warmup_model,
+                    test_dl,
+                    reward_click,
+                    reward_buy,
+                    device,
+                    debug=bool(cfg.get("debug", False)),
+                    split="test(best_warmup)",
+                    state_size=state_size,
+                    item_num=item_num,
+                    purchase_only=purchase_only,
+                )
+
+        write_results(
+            run_dir=run_dir,
+            val_best=val_best,
+            test_best=test_best,
+            val_warmup=val_warmup,
+            test_warmup=test_warmup,
+            smoke_cpu=smoke_cpu,
+        )
+        return
+
     if bool(gs_cfg.get("enable", False)):
         run_optuna_gridsearch(
             cfg=cfg,
