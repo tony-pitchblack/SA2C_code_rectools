@@ -102,6 +102,7 @@ def _plot_group(
     try:
         from matplotlib.lines import Line2D
         from matplotlib.patches import Patch
+        from matplotlib import patheffects as pe
     except Exception as e:  # pragma: no cover
         raise RuntimeError("Missing dependency: matplotlib") from e
 
@@ -179,13 +180,32 @@ def _plot_group(
         ax.set_xlim(left=0.0, right=float(xmax))
 
         dx = 0.01 * float(xmax)
+        text_effects = [pe.withStroke(linewidth=3.0, foreground="white", alpha=0.85)]
         for b in bars:
             w = float(b.get_width())
             ymid = float(b.get_y() + b.get_height() / 2.0)
             if w >= 0.96 * float(xmax):
-                ax.text(w - dx, ymid, f"{w:.4f}", va="center", ha="right", fontsize=8, clip_on=True)
+                ax.text(
+                    w - dx,
+                    ymid,
+                    f"{w:.3f}",
+                    va="center",
+                    ha="right",
+                    fontsize=8,
+                    clip_on=True,
+                    path_effects=text_effects,
+                )
             else:
-                ax.text(w + dx, ymid, f"{w:.4f}", va="center", ha="left", fontsize=8, clip_on=True)
+                ax.text(
+                    w + dx,
+                    ymid,
+                    f"{w:.3f}",
+                    va="center",
+                    ha="left",
+                    fontsize=8,
+                    clip_on=True,
+                    path_effects=text_effects,
+                )
 
     barh(axes[0], [(cfg, p, src) for cfg, _, p, src in rows], kind="purchase")
     axes[0].set_title("purchase test/ndcg@10")
