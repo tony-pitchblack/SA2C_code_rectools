@@ -101,9 +101,24 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
     rows_p = sorted(rows, key=lambda x: float(x[2]), reverse=True)
     rows_c = sorted(rows, key=lambda x: float(x[1]), reverse=True)
 
-    fig_h = max(3.0, 0.35 * max(len(rows), 1) * 2.0)
-    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(12, fig_h))
+    fig_h = max(4.5, 0.35 * max(len(rows), 1) * 2.0 + 1.6)
+    fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(12, fig_h), height_ratios=[1.0, 1.0, 0.55])
     fig.suptitle(title)
+
+    notes = "\n".join(
+        [
+            "notes:",
+            'default = "default SASRecSA2C"',
+            'baseline = "baseline SASRec"',
+            '*auto_warmup = "phase1 (warmup phase) early stopping on val/ndcg@10"',
+            'NO *auto_warmup = "hardcoded epochs for phase1 (warmup phase)"',
+            'sampled_loss = "use sampled softmax for actor & sample next-state Q-values for critic"',
+            "",
+            "impl:",
+            'torch = "reimplementation of author\'s code w/ torch"',
+            'rectools = "reimplementation of author\'s code w/ torch + use rectools SASRec model arch"',
+        ]
+    )
 
     def add_paper_lines(ax, kind: str):
         ds = _PAPER_NDCG10.get(str(dataset_name))
@@ -151,6 +166,9 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
     barh(axes[1], [(cfg, c, src) for cfg, c, _, src in rows_c], kind="clicks")
     axes[1].set_title("clicks test/ndcg@10")
 
+    axes[2].axis("off")
+    axes[2].text(0.0, 1.0, notes, va="top", ha="left", transform=axes[2].transAxes)
+
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
@@ -160,7 +178,7 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
 
 def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str | None, only_eval_scheme: str | None):
     tqdm = _tqdm()
-    by_group: dict[_GroupKey, dict[str, tuple[float, float, float, str]]] = {}
+    by_group: dict[_GroupKey, dict[tuple[str, str], tuple[float, float, float]]] = {}
 
     for script_name in ("SA2C_SASRec_torch", "SA2C_SASRec_rectools"):
         if only_script is not None and script_name != only_script:
@@ -185,16 +203,25 @@ def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str 
             if clicks is None or purchase is None:
                 continue
 
-            label = f"{source}:{config_label}"
             mtime = max(float(clicks_path.stat().st_mtime), float(purchase_path.stat().st_mtime))
             group_map = by_group.setdefault(group_key, {})
-            prev = group_map.get(label)
+            key = (str(config_label), str(source))
+            prev = group_map.get(key)
             if prev is None or mtime > float(prev[2]):
-                group_map[label] = (float(clicks), float(purchase), float(mtime), source)
+                group_map[key] = (float(clicks), float(purchase), float(mtime))
 
     for group_key, cfg_map in tqdm(list(by_group.items()), desc="plot", unit="dataset"):
-        rows = [(cfg, v[0], v[1], v[3]) for cfg, v in cfg_map.items()]
-        rows.sort(key=lambda x: x[0])
+        tmp = [(cfg, src, v[0], v[1], v[2]) for (cfg, src), v in cfg_map.items()]
+        tmp.sort(key=lambda x: (x[0], x[1]))
+
+        counts: dict[str, int] = {}
+        for cfg, _, *_ in tmp:
+            counts[cfg] = counts.get(cfg, 0) + 1
+
+        rows: list[tuple[str, float, float, str]] = []
+        for cfg, src, c, p, _ in tmp:
+            label = cfg if counts.get(cfg, 0) <= 1 else f"{cfg} ({src})"
+            rows.append((label, float(c), float(p), str(src)))
 
         plots_root = logs_root / "plots"
         if group_key.eval_scheme is None:
