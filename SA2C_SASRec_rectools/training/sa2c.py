@@ -54,6 +54,10 @@ def train_sa2c(
     with open(str(pop_dict_path), "r") as f:
         pop_dict = eval(f.read())
 
+    pointwise_cfg = cfg.get("pointwise_critic") or {}
+    use_pointwise_critic = bool(pointwise_cfg.get("use", False))
+    pointwise_arch = str(pointwise_cfg.get("arch", "dot"))
+
     qn1 = SASRecQNetworkRectools(
         item_num=item_num,
         state_size=state_size,
@@ -61,6 +65,8 @@ def train_sa2c(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        pointwise_critic_use=use_pointwise_critic,
+        pointwise_critic_arch=pointwise_arch,
     ).to(device)
     qn2 = SASRecQNetworkRectools(
         item_num=item_num,
@@ -69,6 +75,8 @@ def train_sa2c(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        pointwise_critic_use=use_pointwise_critic,
+        pointwise_critic_arch=pointwise_arch,
     ).to(device)
 
     opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
@@ -175,6 +183,7 @@ def train_sa2c(
             use_sampled_loss = bool(sampled_cfg.get("use", False))
             ce_n_neg = int(sampled_cfg.get("ce_n_negatives", 256))
             critic_n_neg = int(sampled_cfg.get("critic_n_negatives", 256))
+            use_pointwise_branch = use_pointwise_critic
 
             pointer = np.random.randint(0, 2)
             if pointer == 0:
@@ -191,7 +200,7 @@ def train_sa2c(
             is_buy_flat = is_buy[valid_mask]
             done_flat = done_mask[valid_mask].to(torch.float32)
 
-            if use_sampled_loss:
+            if use_sampled_loss or use_pointwise_branch:
                 seqs_main = main_qn.encode_seq(states_x)
                 with torch.no_grad():
                     seqs_tgt = target_qn.encode_seq(states_x)
@@ -210,16 +219,22 @@ def train_sa2c(
                     if not torch.isfinite(seqs_curr_flat).all():
                         raise FloatingPointError(f"Non-finite seq encodings at total_step={int(total_step)}")
 
-                crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg, device=device)
+                critic_n_neg_eff = int(critic_n_neg) if use_sampled_loss else int(cfg.get("neg", 10))
+                crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg_eff, device=device)
                 crit_cands = torch.cat([action_flat[:, None], crit_negs], dim=1)
                 q_curr_c = main_qn.score_q_candidates(seqs_curr_flat, crit_cands)
                 q_curr_tgt_c = target_qn.score_q_candidates(seqs_curr_tgt_flat, crit_cands)
                 q_next_selector_c = main_qn.score_q_candidates(seqs_next_selector_flat, crit_cands)
                 q_next_target_c = target_qn.score_q_candidates(seqs_next_target_flat, crit_cands)
 
-                ce_negs = sample_negative_actions(1, item_num + 1, action_flat, ce_n_neg, device=device)
-                ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
-                ce_logits_c = main_qn.score_ce_candidates(seqs_curr_flat, ce_cands)
+                if use_sampled_loss:
+                    ce_negs = sample_negative_actions(1, item_num + 1, action_flat, ce_n_neg, device=device)
+                    ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
+                    ce_logits_c = main_qn.score_ce_candidates(seqs_curr_flat, ce_cands)
+                else:
+                    ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
+                    ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
+                    ce_logits_c = ce_full_seq[valid_mask]
 
                 if bool(cfg.get("debug", False)):
                     if not torch.isfinite(q_curr_c).all():
@@ -229,10 +244,13 @@ def train_sa2c(
 
                 if reward_fn == "ndcg":
                     with torch.no_grad():
-                        ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
-                        ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
-                        ce_flat_full = ce_full_seq[valid_mask]
-                        reward_flat = ndcg_reward_from_logits(ce_flat_full.detach(), action_flat)
+                        if use_sampled_loss:
+                            ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
+                            ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
+                            ce_flat_full = ce_full_seq[valid_mask]
+                            reward_flat = ndcg_reward_from_logits(ce_flat_full.detach(), action_flat)
+                        else:
+                            reward_flat = ndcg_reward_from_logits(ce_logits_c.detach(), action_flat)
                 else:
                     reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
 
@@ -248,12 +266,19 @@ def train_sa2c(
                 q_sneg = q_curr_c[:, 1:]
                 qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
 
-                ce_loss_pre = F.cross_entropy(
-                    ce_logits_c,
-                    torch.zeros((int(ce_logits_c.shape[0]),), dtype=torch.long, device=device),
-                    reduction="none",
-                )
-                neg_count = int(critic_n_neg)
+                if use_sampled_loss:
+                    ce_loss_pre = F.cross_entropy(
+                        ce_logits_c,
+                        torch.zeros((int(ce_logits_c.shape[0]),), dtype=torch.long, device=device),
+                        reduction="none",
+                    )
+                    with torch.no_grad():
+                        prob = F.softmax(ce_logits_c, dim=1)[:, 0]
+                else:
+                    ce_loss_pre = F.cross_entropy(ce_logits_c, action_flat, reduction="none")
+                    with torch.no_grad():
+                        prob = F.softmax(ce_logits_c, dim=1).gather(1, action_flat[:, None]).squeeze(1)
+                neg_count = int(critic_n_neg_eff)
             else:
                 q_main_seq, ce_main_seq = main_qn(states_x)
                 if bool(cfg.get("debug", False)):
@@ -308,15 +333,13 @@ def train_sa2c(
                 total_step += int(step_count)
             else:
                 with torch.no_grad():
-                    if use_sampled_loss:
-                        prob = F.softmax(ce_logits_c, dim=1)[:, 0]
-                    else:
+                    if not (use_sampled_loss or use_pointwise_branch):
                         prob = F.softmax(ce_flat, dim=1).gather(1, action_flat[:, None]).squeeze(1)
                 behavior_prob = behavior_prob_table[action_flat]
                 ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
 
                 with torch.no_grad():
-                    if use_sampled_loss:
+                    if use_sampled_loss or use_pointwise_branch:
                         q_pos_det = q_curr_c[:, 0]
                         q_neg_det = q_curr_c[:, 1:].sum(dim=1)
                         q_avg = (q_pos_det + q_neg_det) / float(1 + int(neg_count))

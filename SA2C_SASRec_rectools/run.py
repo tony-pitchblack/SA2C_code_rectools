@@ -48,6 +48,9 @@ def main():
     if reward_fn not in {"click_buy", "ndcg"}:
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
     enable_sa2c = bool(cfg.get("enable_sa2c", True))
+    pointwise_cfg = cfg.get("pointwise_critic") or {}
+    pointwise_critic_use = bool(pointwise_cfg.get("use", False))
+    pointwise_critic_arch = str(pointwise_cfg.get("arch", "dot"))
 
     repo_root = Path(__file__).resolve().parent.parent
     dataset_cfg = cfg.get("dataset", "retailrocket")
@@ -269,6 +272,8 @@ def main():
                 num_heads=int(cfg.get("num_heads", 1)),
                 num_blocks=int(cfg.get("num_blocks", 1)),
                 dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                pointwise_critic_use=pointwise_critic_use,
+                pointwise_critic_arch=pointwise_critic_arch,
             ).to(device)
         else:
             best_model = SASRecBaselineRectools(
@@ -318,6 +323,8 @@ def main():
                     num_heads=int(cfg.get("num_heads", 1)),
                     num_blocks=int(cfg.get("num_blocks", 1)),
                     dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                    pointwise_critic_use=pointwise_critic_use,
+                    pointwise_critic_arch=pointwise_critic_arch,
                 ).to(device)
                 warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
                 val_warmup = eval_fn(
@@ -409,6 +416,8 @@ def main():
             num_heads=int(cfg.get("num_heads", 1)),
             num_blocks=int(cfg.get("num_blocks", 1)),
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            pointwise_critic_use=pointwise_critic_use,
+            pointwise_critic_arch=pointwise_critic_arch,
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
     else:
@@ -477,6 +486,8 @@ def main():
             num_heads=int(cfg.get("num_heads", 1)),
             num_blocks=int(cfg.get("num_blocks", 1)),
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            pointwise_critic_use=pointwise_critic_use,
+            pointwise_critic_arch=pointwise_critic_arch,
         ).to(device)
         warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
 

@@ -93,6 +93,9 @@ class SASRecQNetworkRectools(nn.Module):
         dropout_rate: float,
         use_causal_attn: bool = True,
         use_key_padding_mask: bool = False,
+        *,
+        pointwise_critic_use: bool = False,
+        pointwise_critic_arch: str = "dot",
     ):
         super().__init__()
         self.item_num = int(item_num)
@@ -112,6 +115,11 @@ class SASRecQNetworkRectools(nn.Module):
 
         self.head_q = nn.Linear(self.hidden_size, self.item_num + 1)
 
+        self.pointwise_critic_use = bool(pointwise_critic_use)
+        self.pointwise_critic_arch = str(pointwise_critic_arch)
+        if self.pointwise_critic_use and self.pointwise_critic_arch != "dot":
+            raise NotImplementedError("TODO: implement MLP pointwise critic arch")
+
         self.use_causal_attn = bool(use_causal_attn)
         self.use_key_padding_mask = bool(use_key_padding_mask)
         causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
@@ -124,9 +132,11 @@ class SASRecQNetworkRectools(nn.Module):
 
         seqs = self.encode_seq(inputs)
         ce_logits_seq = seqs @ self.item_emb.weight.t()
+        ce_logits_seq[:, :, self.pad_id] = float("-inf")
+        if self.pointwise_critic_use:
+            return ce_logits_seq
         q_values_seq = self.head_q(seqs)
         q_values_seq[:, :, self.pad_id] = float("-inf")
-        ce_logits_seq[:, :, self.pad_id] = float("-inf")
         return q_values_seq, ce_logits_seq
 
     def encode_seq(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -156,7 +166,22 @@ class SASRecQNetworkRectools(nn.Module):
         logits = logits.masked_fill(cand_ids.eq(self.pad_id), float("-inf"))
         return logits
 
+    def q_value(self, seqs_flat: torch.Tensor, item_ids: torch.Tensor) -> torch.Tensor:
+        if not self.pointwise_critic_use:
+            raise RuntimeError("q_value() is only available when pointwise_critic_use=True")
+        if item_ids.ndim == 1:
+            emb = self.item_emb(item_ids)
+            q = (seqs_flat * emb).sum(dim=-1) + self.head_q.bias[item_ids]
+            return q.masked_fill(item_ids.eq(self.pad_id), float("-inf"))
+        if item_ids.ndim == 2:
+            emb = self.item_emb(item_ids)
+            q = (seqs_flat[:, None, :] * emb).sum(dim=-1) + self.head_q.bias[item_ids]
+            return q.masked_fill(item_ids.eq(self.pad_id), float("-inf"))
+        raise ValueError(f"Expected item_ids shape [N] or [N,C], got {tuple(item_ids.shape)}")
+
     def score_q_candidates(self, seqs_flat: torch.Tensor, cand_ids: torch.Tensor) -> torch.Tensor:
+        if self.pointwise_critic_use:
+            return self.q_value(seqs_flat, cand_ids)
         w = self.head_q.weight[cand_ids]
         b = self.head_q.bias[cand_ids]
         logits = (seqs_flat[:, None, :] * w).sum(dim=-1) + b
