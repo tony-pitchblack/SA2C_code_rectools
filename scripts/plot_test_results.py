@@ -86,13 +86,21 @@ def _read_test_ndcg_at_10(csv_path: Path) -> float | None:
         return None
 
 
-def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, float, str]], out_path: Path) -> None:
+def _plot_group(
+    *,
+    title: str,
+    dataset_name: str,
+    rows: list[tuple[str, float, float, str]],
+    out_path: Path,
+    max_metric_value: float | None,
+) -> None:
     try:
         import matplotlib.pyplot as plt
     except Exception as e:  # pragma: no cover
         raise RuntimeError("Missing dependency: matplotlib") from e
 
     try:
+        from matplotlib.lines import Line2D
         from matplotlib.patches import Patch
     except Exception as e:  # pragma: no cover
         raise RuntimeError("Missing dependency: matplotlib") from e
@@ -116,12 +124,6 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
             "impl:",
             'torch = "reimplementation of author\'s code w/ torch"',
             'rectools = "reimplementation of author\'s code w/ torch + use rectools SASRec model arch"',
-            "",
-            "legend:",
-            'gray bar = "torch"',
-            'red bar = "rectools"',
-            'blue dashed = "paper SASRec"',
-            'green dashed = "paper SASRec-SA2C"',
         ]
     )
 
@@ -164,7 +166,11 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
         for cfg in configs:
             for v in by_cfg.get(cfg, {}).values():
                 max_val = max(max_val, float(v))
-        xmax = max(max_val, max_line) * 1.05 if max(max_val, max_line) > 0 else 1.0
+        xmax_auto = max(max_val, max_line) * 1.05 if max(max_val, max_line) > 0 else 1.0
+        if max_metric_value is not None and float(max_metric_value) > 0:
+            xmax = float(max_metric_value)
+        else:
+            xmax = float(xmax_auto)
         ax.set_xlim(left=0.0, right=float(xmax))
 
     barh(axes[0], [(cfg, p, src) for cfg, _, p, src in rows], kind="purchase")
@@ -172,6 +178,14 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
 
     barh(axes[1], [(cfg, c, src) for cfg, c, _, src in rows], kind="clicks")
     axes[1].set_title("clicks test/ndcg@10")
+
+    legend_handles = [
+        Patch(color=color_map["torch"], label="torch"),
+        Patch(color=color_map["rectools"], label="rectools"),
+        Line2D([0], [0], color="C0", linestyle="--", linewidth=1.2, label="paper SASRec"),
+        Line2D([0], [0], color="C2", linestyle="--", linewidth=1.2, label="paper SASRec-SA2C"),
+    ]
+    axes[0].legend(handles=legend_handles, loc="lower right", frameon=False)
 
     axes[2].axis("off")
     axes[2].text(0.0, 1.0, notes, va="top", ha="left", transform=axes[2].transAxes)
@@ -183,7 +197,14 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
     print(str(out_path.resolve()))
 
 
-def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str | None, only_eval_scheme: str | None):
+def _build_plots(
+    *,
+    logs_root: Path,
+    only_script: str | None,
+    only_dataset: str | None,
+    only_eval_scheme: str | None,
+    max_metric_value: float | None,
+):
     tqdm = _tqdm()
     by_group: dict[_GroupKey, dict[str, dict[str, tuple[float, float, float]]]] = {}
 
@@ -234,7 +255,13 @@ def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str 
             out_dir = plots_root / group_key.dataset_name / group_key.eval_scheme
             title = f"{group_key.dataset_name} / {group_key.eval_scheme}"
 
-        _plot_group(title=title, dataset_name=group_key.dataset_name, rows=rows, out_path=out_dir / "test_results.png")
+        _plot_group(
+            title=title,
+            dataset_name=group_key.dataset_name,
+            rows=rows,
+            out_path=out_dir / "test_results.png",
+            max_metric_value=max_metric_value,
+        )
 
 
 def main() -> None:
@@ -242,6 +269,7 @@ def main() -> None:
     p.add_argument("--script", default=None, choices=["SA2C_SASRec_torch", "SA2C_SASRec_rectools"])
     p.add_argument("--dataset", default=None)
     p.add_argument("--eval-scheme", default=None)
+    p.add_argument("--max-metric-value", default=None, type=float)
     args = p.parse_args()
 
     logs_root = _repo_root() / "logs"
@@ -253,6 +281,7 @@ def main() -> None:
         only_script=args.script,
         only_dataset=args.dataset,
         only_eval_scheme=args.eval_scheme,
+        max_metric_value=args.max_metric_value,
     )
 
 
