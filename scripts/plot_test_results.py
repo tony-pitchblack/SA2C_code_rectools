@@ -27,6 +27,11 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _pretty_dataset_name(dataset_name: str) -> str:
+    ds = str(dataset_name)
+    return {"yoochoose": "YooChoose", "retailrocket": "RetailRocket"}.get(ds, ds)
+
+
 def _tqdm():
     try:
         from tqdm.auto import tqdm  # type: ignore[import-not-found]
@@ -111,7 +116,13 @@ def _plot_group(
 
     fig_h = max(4.5, 0.35 * max(len(rows), 1) * 2.0 + 1.6)
     fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(12, fig_h), height_ratios=[1.0, 1.0, 0.55])
-    fig.suptitle(title)
+    if " / " in title:
+        ds_title, subtitle = title.split(" / ", 1)
+    else:
+        ds_title, subtitle = title, None
+    fig.suptitle(str(ds_title), fontsize=24, fontweight="bold")
+    if subtitle:
+        fig.text(0.5, 0.93, str(subtitle), ha="center", va="top", fontsize=14)
 
     notes = "\n".join(
         [
@@ -225,7 +236,7 @@ def _plot_group(
     axes[2].axis("off")
     axes[2].text(0.0, 1.0, notes, va="top", ha="left", transform=axes[2].transAxes)
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0.0, 0.0, 1.0, 0.90])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -298,12 +309,13 @@ def _build_plots(
                 rows.append((str(cfg), float(v[0]), float(v[1]), str(src)))
 
         plots_root = logs_root / "plots"
+        pretty_ds = _pretty_dataset_name(group_key.dataset_name)
         if group_key.eval_scheme is None:
             out_dir = plots_root / group_key.dataset_name
-            title = f"{group_key.dataset_name}"
+            title = f"{pretty_ds}"
         else:
             out_dir = plots_root / group_key.dataset_name / group_key.eval_scheme
-            title = f"{group_key.dataset_name} / {group_key.eval_scheme}"
+            title = f"{pretty_ds} / {group_key.eval_scheme}"
 
         _plot_group(
             title=title,
