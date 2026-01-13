@@ -4,6 +4,25 @@ import torch
 import torch.nn as nn
 
 
+class PointwiseCriticMLP(nn.Module):
+    def __init__(self, in_dim: int, hidden_sizes: list[int], dropout_rate: float):
+        super().__init__()
+        if not isinstance(hidden_sizes, list) or len(hidden_sizes) == 0:
+            raise ValueError("hidden_sizes must be a non-empty list[int]")
+        dims = [int(in_dim)] + [int(x) for x in hidden_sizes] + [1]
+        layers: list[nn.Module] = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(nn.ReLU())
+                if float(dropout_rate) > 0:
+                    layers.append(nn.Dropout(float(dropout_rate)))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class PointWiseFeedForward(nn.Module):
     def __init__(self, n_factors: int, n_factors_ff: int, dropout_rate: float):
         super().__init__()
@@ -93,6 +112,10 @@ class SASRecQNetworkRectools(nn.Module):
         dropout_rate: float,
         use_causal_attn: bool = True,
         use_key_padding_mask: bool = False,
+        *,
+        pointwise_critic_use: bool = False,
+        pointwise_critic_arch: str = "dot",
+        pointwise_critic_mlp: dict | None = None,
     ):
         super().__init__()
         self.item_num = int(item_num)
@@ -112,6 +135,24 @@ class SASRecQNetworkRectools(nn.Module):
 
         self.head_q = nn.Linear(self.hidden_size, self.item_num + 1)
 
+        self.pointwise_critic_use = bool(pointwise_critic_use)
+        self.pointwise_critic_arch = str(pointwise_critic_arch)
+        self.pointwise_critic_mlp = None
+        if self.pointwise_critic_use:
+            if self.pointwise_critic_arch not in {"dot", "mlp"}:
+                raise ValueError("pointwise_critic_arch must be one of: dot | mlp")
+            if self.pointwise_critic_arch == "mlp":
+                mlp_cfg = dict(pointwise_critic_mlp or {})
+                hidden_sizes = mlp_cfg.get("hidden_sizes", None)
+                dr = mlp_cfg.get("dropout_rate", None)
+                if hidden_sizes is None or dr is None:
+                    raise ValueError("pointwise_critic_mlp must contain: hidden_sizes, dropout_rate")
+                self.pointwise_critic_mlp = PointwiseCriticMLP(
+                    in_dim=2 * int(self.hidden_size),
+                    hidden_sizes=list(hidden_sizes),
+                    dropout_rate=float(dr),
+                )
+
         self.use_causal_attn = bool(use_causal_attn)
         self.use_key_padding_mask = bool(use_key_padding_mask)
         causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
@@ -124,10 +165,28 @@ class SASRecQNetworkRectools(nn.Module):
 
         seqs = self.encode_seq(inputs)
         ce_logits_seq = seqs @ self.item_emb.weight.t()
+        ce_logits_seq[:, :, self.pad_id] = float("-inf")
+        if self.pointwise_critic_use:
+            return ce_logits_seq
         q_values_seq = self.head_q(seqs)
         q_values_seq[:, :, self.pad_id] = float("-inf")
-        ce_logits_seq[:, :, self.pad_id] = float("-inf")
         return q_values_seq, ce_logits_seq
+
+    def backbone_modules(self) -> tuple[nn.Module, nn.Module, nn.Module]:
+        return self.item_emb, self.pos_encoding, self.layers
+
+    def backbone_parameters(self):
+        for m in self.backbone_modules():
+            yield from m.parameters()
+
+    def critic_parameters(self):
+        yield from self.head_q.parameters()
+        if self.pointwise_critic_mlp is not None:
+            yield from self.pointwise_critic_mlp.parameters()
+
+    def set_backbone_requires_grad(self, requires_grad: bool) -> None:
+        for p in self.backbone_parameters():
+            p.requires_grad_(bool(requires_grad))
 
     def encode_seq(self, inputs: torch.Tensor) -> torch.Tensor:
         bsz, seqlen = inputs.shape
@@ -156,7 +215,38 @@ class SASRecQNetworkRectools(nn.Module):
         logits = logits.masked_fill(cand_ids.eq(self.pad_id), float("-inf"))
         return logits
 
+    def q_value(self, seqs_flat: torch.Tensor, item_ids: torch.Tensor) -> torch.Tensor:
+        if not self.pointwise_critic_use:
+            raise RuntimeError("q_value() is only available when pointwise_critic_use=True")
+        if self.pointwise_critic_arch == "mlp":
+            if self.pointwise_critic_mlp is None:
+                raise RuntimeError("pointwise_critic_mlp is not initialized")
+            if item_ids.ndim == 1:
+                emb = self.item_emb(item_ids)
+                x = torch.cat([seqs_flat, emb], dim=-1)
+                q = self.pointwise_critic_mlp(x).squeeze(-1)
+                return q.masked_fill(item_ids.eq(self.pad_id), float("-inf"))
+            if item_ids.ndim == 2:
+                emb = self.item_emb(item_ids)
+                n, c, d = emb.shape
+                seq_rep = seqs_flat[:, None, :].expand(n, c, d)
+                x = torch.cat([seq_rep, emb], dim=-1).reshape(n * c, -1)
+                q = self.pointwise_critic_mlp(x).view(n, c)
+                return q.masked_fill(item_ids.eq(self.pad_id), float("-inf"))
+            raise ValueError(f"Expected item_ids shape [N] or [N,C], got {tuple(item_ids.shape)}")
+        if item_ids.ndim == 1:
+            emb = self.item_emb(item_ids)
+            q = (seqs_flat * emb).sum(dim=-1) + self.head_q.bias[item_ids]
+            return q.masked_fill(item_ids.eq(self.pad_id), float("-inf"))
+        if item_ids.ndim == 2:
+            emb = self.item_emb(item_ids)
+            q = (seqs_flat[:, None, :] * emb).sum(dim=-1) + self.head_q.bias[item_ids]
+            return q.masked_fill(item_ids.eq(self.pad_id), float("-inf"))
+        raise ValueError(f"Expected item_ids shape [N] or [N,C], got {tuple(item_ids.shape)}")
+
     def score_q_candidates(self, seqs_flat: torch.Tensor, cand_ids: torch.Tensor) -> torch.Tensor:
+        if self.pointwise_critic_use:
+            return self.q_value(seqs_flat, cand_ids)
         w = self.head_q.weight[cand_ids]
         b = self.head_q.bias[cand_ids]
         logits = (seqs_flat[:, None, :] * w).sum(dim=-1) + b

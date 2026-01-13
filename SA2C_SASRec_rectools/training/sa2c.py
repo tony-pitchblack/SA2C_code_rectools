@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import RandomSampler
 
+from ..config import validate_pointwise_critic_cfg
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
 from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
 from ..models import SASRecQNetworkRectools
@@ -23,6 +24,59 @@ def sample_negative_actions(min_id: int, max_id_exclusive: int, actions, neg, de
         neg_actions[bad] = torch.randint(int(min_id), int(max_id_exclusive), size=(int(bad.sum().item()),), device=device)
         bad = neg_actions.eq(actions[:, None])
     return neg_actions
+
+
+def sample_negative_actions_by_mu(mu: torch.Tensor, actions: torch.Tensor, neg: int) -> torch.Tensor:
+    if mu.ndim != 1:
+        raise ValueError(f"Expected mu shape [V], got {tuple(mu.shape)}")
+    if actions.ndim != 1:
+        raise ValueError(f"Expected actions shape [N], got {tuple(actions.shape)}")
+    n = int(actions.shape[0])
+    neg = int(neg)
+    if neg <= 0:
+        return torch.empty((n, 0), dtype=actions.dtype, device=actions.device)
+
+    w = mu.to(dtype=torch.float32, device=actions.device)
+    w = w.clone()
+    if w.numel() > 0:
+        w[0] = 0.0
+    w = w.clamp_min(0.0)
+    if float(w.sum().item()) <= 0.0:
+        raise ValueError("mu must have positive mass on non-pad items")
+
+    neg_actions = torch.multinomial(w, num_samples=n * neg, replacement=True).view(n, neg).to(actions.dtype)
+    bad = neg_actions.eq(actions[:, None])
+    while bad.any():
+        k = int(bad.sum().item())
+        neg_actions[bad] = torch.multinomial(w, num_samples=k, replacement=True).to(actions.dtype)
+        bad = neg_actions.eq(actions[:, None])
+    return neg_actions
+
+
+def sample_corrected_policy_index(ce_logits_c: torch.Tensor, mu_c: torch.Tensor, mu_eps: float) -> torch.Tensor:
+    if ce_logits_c.ndim != 2:
+        raise ValueError(f"Expected ce_logits_c shape [N,C], got {tuple(ce_logits_c.shape)}")
+    if mu_c.shape != ce_logits_c.shape:
+        raise ValueError(f"Expected mu_c shape {tuple(ce_logits_c.shape)}, got {tuple(mu_c.shape)}")
+    corr = ce_logits_c - torch.log(mu_c.clamp_min(float(mu_eps)))
+    probs = F.softmax(corr, dim=1)
+    return torch.multinomial(probs, num_samples=1)
+
+
+def _resolve_pretrained_baseline_ckpt(*, run_dir: Path, pretrained_config_name: str) -> Path:
+    return run_dir.parent / str(pretrained_config_name) / "best_model.pt"
+
+
+def _load_pretrained_backbone_into_qnet(*, qnet: torch.nn.Module, ckpt_path: Path, device: torch.device) -> None:
+    state = torch.load(str(ckpt_path), map_location=device)
+    if not isinstance(state, dict):
+        raise ValueError(f"Invalid checkpoint format: {ckpt_path}")
+    prefixes = ("item_emb.", "pos_encoding.", "layers.")
+    backbone_state = {k: v for k, v in state.items() if isinstance(k, str) and k.startswith(prefixes)}
+    try:
+        qnet.load_state_dict(backbone_state, strict=False)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load pretrained backbone from {ckpt_path}") from e
 
 
 def train_sa2c(
@@ -54,6 +108,12 @@ def train_sa2c(
     with open(str(pop_dict_path), "r") as f:
         pop_dict = eval(f.read())
 
+    use_pointwise_critic, pointwise_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
+
+    critic_sampling_cfg = cfg.get("critic_sampling") or {}
+    critic_use_pop_policy = bool(critic_sampling_cfg.get("use_pop_policy", False))
+    critic_mu_eps = float(critic_sampling_cfg.get("mu_eps", 1e-12))
+
     qn1 = SASRecQNetworkRectools(
         item_num=item_num,
         state_size=state_size,
@@ -61,6 +121,9 @@ def train_sa2c(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        pointwise_critic_use=use_pointwise_critic,
+        pointwise_critic_arch=pointwise_arch,
+        pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
     qn2 = SASRecQNetworkRectools(
         item_num=item_num,
@@ -69,12 +132,44 @@ def train_sa2c(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        pointwise_critic_use=use_pointwise_critic,
+        pointwise_critic_arch=pointwise_arch,
+        pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
 
-    opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
-    opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+    pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
+    use_pretrained_backbone = bool(isinstance(pretrained_backbone_cfg, dict) and pretrained_backbone_cfg.get("use", False))
+    if use_pretrained_backbone:
+        pretrained_config_name = str(pretrained_backbone_cfg.get("pretrained_config_name"))
+        ckpt_path = _resolve_pretrained_baseline_ckpt(run_dir=run_dir, pretrained_config_name=pretrained_config_name)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Missing pretrained backbone checkpoint: {ckpt_path}")
+        _load_pretrained_backbone_into_qnet(qnet=qn1, ckpt_path=ckpt_path, device=device)
+        _load_pretrained_backbone_into_qnet(qnet=qn2, ckpt_path=ckpt_path, device=device)
+
+    if use_pretrained_backbone:
+        backbone_lr_phase1 = pretrained_backbone_cfg.get("backbone_lr", None)
+        backbone_lr_phase2 = pretrained_backbone_cfg.get("backbone_lr_2", None)
+
+        def _make_opt(qn: SASRecQNetworkRectools, *, critic_lr: float, backbone_lr) -> torch.optim.Optimizer:
+            groups: list[dict] = [{"params": list(qn.critic_parameters()), "lr": float(critic_lr)}]
+            if backbone_lr is not None:
+                groups.append({"params": list(qn.backbone_parameters()), "lr": float(backbone_lr)})
+            return torch.optim.Adam(groups)
+
+        opt1_qn1 = _make_opt(qn1, critic_lr=float(cfg.get("lr", 0.005)), backbone_lr=backbone_lr_phase1)
+        opt2_qn1 = _make_opt(qn1, critic_lr=float(cfg.get("lr_2", 0.001)), backbone_lr=backbone_lr_phase2)
+        opt1_qn2 = _make_opt(qn2, critic_lr=float(cfg.get("lr", 0.005)), backbone_lr=backbone_lr_phase1)
+        opt2_qn2 = _make_opt(qn2, critic_lr=float(cfg.get("lr_2", 0.001)), backbone_lr=backbone_lr_phase2)
+        backbone_train_enabled: bool | None = None
+    else:
+        backbone_lr_phase1 = None
+        backbone_lr_phase2 = None
+        backbone_train_enabled = None
+        opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+        opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
 
     total_step = 0
 
@@ -161,6 +256,13 @@ def train_sa2c(
                 in_warmup = epoch_progress < warmup_epochs
             else:
                 in_warmup = phase == "warmup"
+
+            if use_pretrained_backbone:
+                desired_backbone_train = (backbone_lr_phase1 is not None) if in_warmup else (backbone_lr_phase2 is not None)
+                if backbone_train_enabled is None or desired_backbone_train != backbone_train_enabled:
+                    qn1.set_backbone_requires_grad(desired_backbone_train)
+                    qn2.set_backbone_requires_grad(desired_backbone_train)
+                    backbone_train_enabled = desired_backbone_train
             if (not in_warmup) and (not entered_finetune):
                 entered_finetune = True
                 if not warmup_baseline_finalized:
@@ -175,6 +277,7 @@ def train_sa2c(
             use_sampled_loss = bool(sampled_cfg.get("use", False))
             ce_n_neg = int(sampled_cfg.get("ce_n_negatives", 256))
             critic_n_neg = int(sampled_cfg.get("critic_n_negatives", 256))
+            use_pointwise_branch = use_pointwise_critic
 
             pointer = np.random.randint(0, 2)
             if pointer == 0:
@@ -191,7 +294,7 @@ def train_sa2c(
             is_buy_flat = is_buy[valid_mask]
             done_flat = done_mask[valid_mask].to(torch.float32)
 
-            if use_sampled_loss:
+            if use_sampled_loss or use_pointwise_branch:
                 seqs_main = main_qn.encode_seq(states_x)
                 with torch.no_grad():
                     seqs_tgt = target_qn.encode_seq(states_x)
@@ -210,16 +313,25 @@ def train_sa2c(
                     if not torch.isfinite(seqs_curr_flat).all():
                         raise FloatingPointError(f"Non-finite seq encodings at total_step={int(total_step)}")
 
-                crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg, device=device)
+                critic_n_neg_eff = int(critic_n_neg) if use_sampled_loss else int(cfg.get("neg", 10))
+                if critic_use_pop_policy:
+                    crit_negs = sample_negative_actions_by_mu(behavior_prob_table, action_flat, critic_n_neg_eff)
+                else:
+                    crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg_eff, device=device)
                 crit_cands = torch.cat([action_flat[:, None], crit_negs], dim=1)
                 q_curr_c = main_qn.score_q_candidates(seqs_curr_flat, crit_cands)
                 q_curr_tgt_c = target_qn.score_q_candidates(seqs_curr_tgt_flat, crit_cands)
                 q_next_selector_c = main_qn.score_q_candidates(seqs_next_selector_flat, crit_cands)
                 q_next_target_c = target_qn.score_q_candidates(seqs_next_target_flat, crit_cands)
 
-                ce_negs = sample_negative_actions(1, item_num + 1, action_flat, ce_n_neg, device=device)
-                ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
-                ce_logits_c = main_qn.score_ce_candidates(seqs_curr_flat, ce_cands)
+                if use_sampled_loss:
+                    ce_negs = sample_negative_actions(1, item_num + 1, action_flat, ce_n_neg, device=device)
+                    ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
+                    ce_logits_c = main_qn.score_ce_candidates(seqs_curr_flat, ce_cands)
+                else:
+                    ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
+                    ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
+                    ce_logits_c = ce_full_seq[valid_mask]
 
                 if bool(cfg.get("debug", False)):
                     if not torch.isfinite(q_curr_c).all():
@@ -229,15 +341,24 @@ def train_sa2c(
 
                 if reward_fn == "ndcg":
                     with torch.no_grad():
-                        ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
-                        ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
-                        ce_flat_full = ce_full_seq[valid_mask]
-                        reward_flat = ndcg_reward_from_logits(ce_flat_full.detach(), action_flat)
+                        if use_sampled_loss:
+                            ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
+                            ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
+                            ce_flat_full = ce_full_seq[valid_mask]
+                            reward_flat = ndcg_reward_from_logits(ce_flat_full.detach(), action_flat)
+                        else:
+                            reward_flat = ndcg_reward_from_logits(ce_logits_c.detach(), action_flat)
                 else:
                     reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
 
-                a_star_idx = q_next_selector_c.argmax(dim=1)
-                q_tp1 = q_next_target_c.gather(1, a_star_idx[:, None]).squeeze(1)
+                if critic_use_pop_policy:
+                    ce_next_logits_c = main_qn.score_ce_candidates(seqs_next_selector_flat, crit_cands)
+                    mu_c = behavior_prob_table[crit_cands]
+                    a_star_idx = sample_corrected_policy_index(ce_next_logits_c, mu_c, critic_mu_eps)
+                    q_tp1 = q_next_target_c.gather(1, a_star_idx).squeeze(1)
+                else:
+                    a_star_idx = q_next_selector_c.argmax(dim=1)
+                    q_tp1 = q_next_target_c.gather(1, a_star_idx[:, None]).squeeze(1)
                 target_pos = reward_flat + discount * q_tp1 * (1.0 - done_flat)
                 q_sa = q_curr_c[:, 0]
                 qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
@@ -248,12 +369,19 @@ def train_sa2c(
                 q_sneg = q_curr_c[:, 1:]
                 qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
 
-                ce_loss_pre = F.cross_entropy(
-                    ce_logits_c,
-                    torch.zeros((int(ce_logits_c.shape[0]),), dtype=torch.long, device=device),
-                    reduction="none",
-                )
-                neg_count = int(critic_n_neg)
+                if use_sampled_loss:
+                    ce_loss_pre = F.cross_entropy(
+                        ce_logits_c,
+                        torch.zeros((int(ce_logits_c.shape[0]),), dtype=torch.long, device=device),
+                        reduction="none",
+                    )
+                    with torch.no_grad():
+                        prob = F.softmax(ce_logits_c, dim=1)[:, 0]
+                else:
+                    ce_loss_pre = F.cross_entropy(ce_logits_c, action_flat, reduction="none")
+                    with torch.no_grad():
+                        prob = F.softmax(ce_logits_c, dim=1).gather(1, action_flat[:, None]).squeeze(1)
+                neg_count = int(critic_n_neg_eff)
             else:
                 q_main_seq, ce_main_seq = main_qn(states_x)
                 if bool(cfg.get("debug", False)):
@@ -308,15 +436,13 @@ def train_sa2c(
                 total_step += int(step_count)
             else:
                 with torch.no_grad():
-                    if use_sampled_loss:
-                        prob = F.softmax(ce_logits_c, dim=1)[:, 0]
-                    else:
+                    if not (use_sampled_loss or use_pointwise_branch):
                         prob = F.softmax(ce_flat, dim=1).gather(1, action_flat[:, None]).squeeze(1)
                 behavior_prob = behavior_prob_table[action_flat]
                 ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
 
                 with torch.no_grad():
-                    if use_sampled_loss:
+                    if use_sampled_loss or use_pointwise_branch:
                         q_pos_det = q_curr_c[:, 0]
                         q_neg_det = q_curr_c[:, 1:].sum(dim=1)
                         q_avg = (q_pos_det + q_neg_det) / float(1 + int(neg_count))

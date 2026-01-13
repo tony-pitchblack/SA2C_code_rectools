@@ -1,0 +1,48 @@
+seed: 0
+dataset: yoochoose
+data: data
+epoch: 200
+warmup_epochs: 40
+
+purchase_only: false
+
+batch_size_train: 4000 # ~31GB GPU mem
+batch_size_val: 128
+num_workers_train: 6
+num_workers_val: 0
+device_id: 3
+
+hidden_factor: 64
+num_heads: 1
+num_blocks: 1
+dropout_rate: 0.1
+
+r_click: 0.2
+r_buy: 1.0
+r_negative: -0.0
+discount: 0.5
+weight: 1.0
+smooth: 0.0
+clip: 0.0
+
+lr: 0.005
+lr_2: 0.001
+
+sampled_loss:
+  use: true
+  ce_n_negatives: 256
+  critic_n_negatives: 256
+
+pointwise_critic:
+  use: true
+  arch: mlp
+  mlp:
+    hidden_sizes: [256, 128]
+    dropout_rate: 0.1
+
+max_steps: 0
+debug: false
+
+early_stopping_ep: 10
+early_stopping_metric: ndcg@10
+

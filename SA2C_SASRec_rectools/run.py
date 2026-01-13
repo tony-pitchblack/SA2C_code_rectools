@@ -11,7 +11,7 @@ import torch
 
 from .artifacts import write_results
 from .cli import parse_args
-from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config
+from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config, validate_pointwise_critic_cfg
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
 from .data_utils.persrec_tc5 import prepare_persrec_tc5
 from .data_utils.sessions import SessionDataset, make_session_loader
@@ -48,6 +48,7 @@ def main():
     if reward_fn not in {"click_buy", "ndcg"}:
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
     enable_sa2c = bool(cfg.get("enable_sa2c", True))
+    pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
 
     repo_root = Path(__file__).resolve().parent.parent
     dataset_cfg = cfg.get("dataset", "retailrocket")
@@ -65,6 +66,35 @@ def main():
         config_name = f"{config_name}_sanity"
     eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
     run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
+
+    pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
+    if not isinstance(pretrained_backbone_cfg, dict):
+        raise ValueError("pretrained_backbone must be a mapping (dict)")
+    use_pretrained_backbone = bool(pretrained_backbone_cfg.get("use", False))
+    if use_pretrained_backbone and (not enable_sa2c):
+        raise ValueError("pretrained_backbone.use=true requires enable_sa2c=true")
+    if use_pretrained_backbone:
+        if "pretrained_config_name" not in pretrained_backbone_cfg:
+            raise ValueError("Missing required config: pretrained_backbone.pretrained_config_name")
+        if "backbone_lr" not in pretrained_backbone_cfg:
+            raise ValueError("Missing required config: pretrained_backbone.backbone_lr")
+        if "backbone_lr_2" not in pretrained_backbone_cfg:
+            raise ValueError("Missing required config: pretrained_backbone.backbone_lr_2")
+
+        pretrained_config_name = pretrained_backbone_cfg.get("pretrained_config_name")
+        if not isinstance(pretrained_config_name, str) or (not pretrained_config_name.strip()):
+            raise ValueError("pretrained_backbone.pretrained_config_name must be a non-empty string")
+
+        for k in ("backbone_lr", "backbone_lr_2"):
+            v = pretrained_backbone_cfg.get(k, None)
+            if v is None:
+                continue
+            try:
+                pretrained_backbone_cfg[k] = float(v)
+            except Exception as e:
+                raise ValueError(f"pretrained_backbone.{k} must be a float or null") from e
+        cfg["pretrained_backbone"] = pretrained_backbone_cfg
+
     configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
     dump_config(cfg, run_dir)
 
@@ -269,6 +299,9 @@ def main():
                 num_heads=int(cfg.get("num_heads", 1)),
                 num_blocks=int(cfg.get("num_blocks", 1)),
                 dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                pointwise_critic_use=pointwise_critic_use,
+                pointwise_critic_arch=pointwise_critic_arch,
+                pointwise_critic_mlp=pointwise_mlp_cfg,
             ).to(device)
         else:
             best_model = SASRecBaselineRectools(
@@ -318,6 +351,9 @@ def main():
                     num_heads=int(cfg.get("num_heads", 1)),
                     num_blocks=int(cfg.get("num_blocks", 1)),
                     dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                    pointwise_critic_use=pointwise_critic_use,
+                    pointwise_critic_arch=pointwise_critic_arch,
+                    pointwise_critic_mlp=pointwise_mlp_cfg,
                 ).to(device)
                 warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
                 val_warmup = eval_fn(
@@ -409,6 +445,9 @@ def main():
             num_heads=int(cfg.get("num_heads", 1)),
             num_blocks=int(cfg.get("num_blocks", 1)),
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            pointwise_critic_use=pointwise_critic_use,
+            pointwise_critic_arch=pointwise_critic_arch,
+            pointwise_critic_mlp=pointwise_mlp_cfg,
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
     else:
@@ -477,6 +516,9 @@ def main():
             num_heads=int(cfg.get("num_heads", 1)),
             num_blocks=int(cfg.get("num_blocks", 1)),
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            pointwise_critic_use=pointwise_critic_use,
+            pointwise_critic_arch=pointwise_critic_arch,
+            pointwise_critic_mlp=pointwise_mlp_cfg,
         ).to(device)
         warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import yaml
 
+from .config import validate_pointwise_critic_cfg
 from .logging_utils import configure_logging, dump_config
 from .metrics import evaluate, get_metric_value
 from .models import SASRecBaselineRectools, SASRecQNetworkRectools
@@ -92,6 +93,7 @@ def run_optuna_gridsearch(
 
         try:
             if enable_sa2c:
+                pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(trial_cfg)
                 reward_negative_trial = float(trial_cfg.get("r_negative", reward_negative))
                 if pop_dict_path is None:
                     raise ValueError("pop_dict_path is required when enable_sa2c=true")
@@ -125,6 +127,9 @@ def run_optuna_gridsearch(
                     num_heads=int(trial_cfg.get("num_heads", 1)),
                     num_blocks=int(trial_cfg.get("num_blocks", 1)),
                     dropout_rate=float(trial_cfg.get("dropout_rate", 0.1)),
+                    pointwise_critic_use=pointwise_critic_use,
+                    pointwise_critic_arch=pointwise_critic_arch,
+                    pointwise_critic_mlp=pointwise_mlp_cfg,
                 ).to(device)
             else:
                 best_path = train_baseline(
@@ -209,6 +214,7 @@ def run_optuna_gridsearch(
 
         enable_sa2c = bool(best_cfg.get("enable_sa2c", True))
         if enable_sa2c:
+            pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(best_cfg)
             best_model = SASRecQNetworkRectools(
                 item_num=item_num,
                 state_size=state_size,
@@ -216,6 +222,9 @@ def run_optuna_gridsearch(
                 num_heads=int(best_cfg.get("num_heads", 1)),
                 num_blocks=int(best_cfg.get("num_blocks", 1)),
                 dropout_rate=float(best_cfg.get("dropout_rate", 0.1)),
+                pointwise_critic_use=pointwise_critic_use,
+                pointwise_critic_arch=pointwise_critic_arch,
+                pointwise_critic_mlp=pointwise_mlp_cfg,
             ).to(device)
         else:
             best_model = SASRecBaselineRectools(
