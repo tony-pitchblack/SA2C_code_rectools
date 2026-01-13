@@ -10,7 +10,7 @@ batch_size_train: 5500 # ~32GB GPU mem
 batch_size_val: 128
 num_workers_train: 4
 num_workers_val: 0
-device_id: 2
+device_id: 1
 
 hidden_factor: 64
 num_heads: 1
