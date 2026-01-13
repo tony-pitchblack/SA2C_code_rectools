@@ -63,6 +63,22 @@ def sample_corrected_policy_index(ce_logits_c: torch.Tensor, mu_c: torch.Tensor,
     return torch.multinomial(probs, num_samples=1)
 
 
+def _resolve_pretrained_baseline_ckpt(*, run_dir: Path, pretrained_config_name: str) -> Path:
+    return run_dir.parent / str(pretrained_config_name) / "best_model.pt"
+
+
+def _load_pretrained_backbone_into_qnet(*, qnet: torch.nn.Module, ckpt_path: Path, device: torch.device) -> None:
+    state = torch.load(str(ckpt_path), map_location=device)
+    if not isinstance(state, dict):
+        raise ValueError(f"Invalid checkpoint format: {ckpt_path}")
+    prefixes = ("item_emb.", "pos_encoding.", "layers.")
+    backbone_state = {k: v for k, v in state.items() if isinstance(k, str) and k.startswith(prefixes)}
+    try:
+        qnet.load_state_dict(backbone_state, strict=False)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load pretrained backbone from {ckpt_path}") from e
+
+
 def train_sa2c(
     *,
     cfg: dict,
@@ -121,10 +137,39 @@ def train_sa2c(
         pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
 
-    opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
-    opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
-    opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+    pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
+    use_pretrained_backbone = bool(isinstance(pretrained_backbone_cfg, dict) and pretrained_backbone_cfg.get("use", False))
+    if use_pretrained_backbone:
+        pretrained_config_name = str(pretrained_backbone_cfg.get("pretrained_config_name"))
+        ckpt_path = _resolve_pretrained_baseline_ckpt(run_dir=run_dir, pretrained_config_name=pretrained_config_name)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Missing pretrained backbone checkpoint: {ckpt_path}")
+        _load_pretrained_backbone_into_qnet(qnet=qn1, ckpt_path=ckpt_path, device=device)
+        _load_pretrained_backbone_into_qnet(qnet=qn2, ckpt_path=ckpt_path, device=device)
+
+    if use_pretrained_backbone:
+        backbone_lr_phase1 = pretrained_backbone_cfg.get("backbone_lr", None)
+        backbone_lr_phase2 = pretrained_backbone_cfg.get("backbone_lr_2", None)
+
+        def _make_opt(qn: SASRecQNetworkRectools, *, critic_lr: float, backbone_lr) -> torch.optim.Optimizer:
+            groups: list[dict] = [{"params": list(qn.critic_parameters()), "lr": float(critic_lr)}]
+            if backbone_lr is not None:
+                groups.append({"params": list(qn.backbone_parameters()), "lr": float(backbone_lr)})
+            return torch.optim.Adam(groups)
+
+        opt1_qn1 = _make_opt(qn1, critic_lr=float(cfg.get("lr", 0.005)), backbone_lr=backbone_lr_phase1)
+        opt2_qn1 = _make_opt(qn1, critic_lr=float(cfg.get("lr_2", 0.001)), backbone_lr=backbone_lr_phase2)
+        opt1_qn2 = _make_opt(qn2, critic_lr=float(cfg.get("lr", 0.005)), backbone_lr=backbone_lr_phase1)
+        opt2_qn2 = _make_opt(qn2, critic_lr=float(cfg.get("lr_2", 0.001)), backbone_lr=backbone_lr_phase2)
+        backbone_train_enabled: bool | None = None
+    else:
+        backbone_lr_phase1 = None
+        backbone_lr_phase2 = None
+        backbone_train_enabled = None
+        opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr_2", 0.001)))
+        opt1_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr", 0.005)))
+        opt2_qn2 = torch.optim.Adam(qn2.parameters(), lr=float(cfg.get("lr_2", 0.001)))
 
     total_step = 0
 
@@ -211,6 +256,13 @@ def train_sa2c(
                 in_warmup = epoch_progress < warmup_epochs
             else:
                 in_warmup = phase == "warmup"
+
+            if use_pretrained_backbone:
+                desired_backbone_train = (backbone_lr_phase1 is not None) if in_warmup else (backbone_lr_phase2 is not None)
+                if backbone_train_enabled is None or desired_backbone_train != backbone_train_enabled:
+                    qn1.set_backbone_requires_grad(desired_backbone_train)
+                    qn2.set_backbone_requires_grad(desired_backbone_train)
+                    backbone_train_enabled = desired_backbone_train
             if (not in_warmup) and (not entered_finetune):
                 entered_finetune = True
                 if not warmup_baseline_finalized:

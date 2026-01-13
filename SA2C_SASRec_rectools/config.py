@@ -44,6 +44,12 @@ def default_config() -> dict:
         "r_negative": -0.0,
         "lr": 0.005,
         "lr_2": 0.001,
+        "pretrained_backbone": {
+            "use": False,
+            "pretrained_config_name": None,
+            "backbone_lr": None,
+            "backbone_lr_2": None,
+        },
         "discount": 0.5,
         "neg": 10,
         "sampled_loss": {

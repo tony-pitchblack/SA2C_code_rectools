@@ -24,6 +24,8 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/b
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_pointwise_critic.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_auto_warmup.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained_auto_warmup.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_auto_warmup.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_pointwise_critic_auto_warmup.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only.yaml
@@ -43,6 +45,8 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/samp
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_mlp.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_auto_warmup.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained.yml
+python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained_auto_warmup.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_auto_warmup.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_auto_warmup.yml
 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_mlp_auto_warmup.yml

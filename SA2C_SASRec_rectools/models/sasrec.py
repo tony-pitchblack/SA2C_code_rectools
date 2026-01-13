@@ -172,6 +172,22 @@ class SASRecQNetworkRectools(nn.Module):
         q_values_seq[:, :, self.pad_id] = float("-inf")
         return q_values_seq, ce_logits_seq
 
+    def backbone_modules(self) -> tuple[nn.Module, nn.Module, nn.Module]:
+        return self.item_emb, self.pos_encoding, self.layers
+
+    def backbone_parameters(self):
+        for m in self.backbone_modules():
+            yield from m.parameters()
+
+    def critic_parameters(self):
+        yield from self.head_q.parameters()
+        if self.pointwise_critic_mlp is not None:
+            yield from self.pointwise_critic_mlp.parameters()
+
+    def set_backbone_requires_grad(self, requires_grad: bool) -> None:
+        for p in self.backbone_parameters():
+            p.requires_grad_(bool(requires_grad))
+
     def encode_seq(self, inputs: torch.Tensor) -> torch.Tensor:
         bsz, seqlen = inputs.shape
         if seqlen != self.state_size:

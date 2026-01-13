@@ -66,6 +66,35 @@ def main():
         config_name = f"{config_name}_sanity"
     eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
     run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
+
+    pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
+    if not isinstance(pretrained_backbone_cfg, dict):
+        raise ValueError("pretrained_backbone must be a mapping (dict)")
+    use_pretrained_backbone = bool(pretrained_backbone_cfg.get("use", False))
+    if use_pretrained_backbone and (not enable_sa2c):
+        raise ValueError("pretrained_backbone.use=true requires enable_sa2c=true")
+    if use_pretrained_backbone:
+        if "pretrained_config_name" not in pretrained_backbone_cfg:
+            raise ValueError("Missing required config: pretrained_backbone.pretrained_config_name")
+        if "backbone_lr" not in pretrained_backbone_cfg:
+            raise ValueError("Missing required config: pretrained_backbone.backbone_lr")
+        if "backbone_lr_2" not in pretrained_backbone_cfg:
+            raise ValueError("Missing required config: pretrained_backbone.backbone_lr_2")
+
+        pretrained_config_name = pretrained_backbone_cfg.get("pretrained_config_name")
+        if not isinstance(pretrained_config_name, str) or (not pretrained_config_name.strip()):
+            raise ValueError("pretrained_backbone.pretrained_config_name must be a non-empty string")
+
+        for k in ("backbone_lr", "backbone_lr_2"):
+            v = pretrained_backbone_cfg.get(k, None)
+            if v is None:
+                continue
+            try:
+                pretrained_backbone_cfg[k] = float(v)
+            except Exception as e:
+                raise ValueError(f"pretrained_backbone.{k} must be a float or null") from e
+        cfg["pretrained_backbone"] = pretrained_backbone_cfg
+
     configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
     dump_config(cfg, run_dir)
 
