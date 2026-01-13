@@ -149,12 +149,17 @@ def _plot_group(
         y = list(range(len(configs)))
         h = 0.35
         offset = 0.20
+        bars = []
         for i, cfg in enumerate(configs):
             m = by_cfg.get(cfg, {})
             if "torch" in m:
-                ax.barh(i - offset, float(m["torch"]), height=h, color=color_map["torch"])
+                bars.extend(
+                    ax.barh(i - offset, float(m["torch"]), height=h, color=color_map["torch"])
+                )
             if "rectools" in m:
-                ax.barh(i + offset, float(m["rectools"]), height=h, color=color_map["rectools"])
+                bars.extend(
+                    ax.barh(i + offset, float(m["rectools"]), height=h, color=color_map["rectools"])
+                )
 
         ax.set_yticks(y, labels=configs)
         ax.invert_yaxis()
@@ -172,6 +177,15 @@ def _plot_group(
         else:
             xmax = float(xmax_auto)
         ax.set_xlim(left=0.0, right=float(xmax))
+
+        dx = 0.01 * float(xmax)
+        for b in bars:
+            w = float(b.get_width())
+            ymid = float(b.get_y() + b.get_height() / 2.0)
+            if w >= 0.96 * float(xmax):
+                ax.text(w - dx, ymid, f"{w:.4f}", va="center", ha="right", fontsize=8, clip_on=True)
+            else:
+                ax.text(w + dx, ymid, f"{w:.4f}", va="center", ha="left", fontsize=8, clip_on=True)
 
     barh(axes[0], [(cfg, p, src) for cfg, _, p, src in rows], kind="purchase")
     axes[0].set_title("purchase test/ndcg@10")
