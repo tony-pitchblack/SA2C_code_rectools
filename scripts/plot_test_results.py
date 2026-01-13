@@ -114,14 +114,14 @@ def _plot_group(
 
     notes = "\n".join(
         [
-            "notes:",
+            "Notes on config names:",
             'default = "default SASRecSA2C"',
             'baseline = "baseline SASRec"',
             '*auto_warmup = "phase1 (warmup phase) early stopping on val/ndcg@10"',
             'NO *auto_warmup = "hardcoded epochs for phase1 (warmup phase)"',
             'sampled_loss = "use sampled softmax for actor & sample next-state Q-values for critic"',
             "",
-            "impl:",
+            "Notes on implementations:",
             'torch = "reimplementation of author\'s code w/ torch"',
             'rectools = "reimplementation of author\'s code w/ torch + use rectools SASRec model arch"',
         ]
@@ -187,6 +187,7 @@ def _plot_group(
     ]
     axes[0].legend(handles=legend_handles, loc="lower right", frameon=False)
 
+    axes[2].set_title("Notes on configs/implementations")
     axes[2].axis("off")
     axes[2].text(0.0, 1.0, notes, va="top", ha="left", transform=axes[2].transAxes)
 
