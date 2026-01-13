@@ -308,7 +308,8 @@ def _build_plots(
                     continue
                 rows.append((str(cfg), float(v[0]), float(v[1]), str(src)))
 
-        plots_root = logs_root / "plots"
+        results_root = logs_root.parent / "results"
+        plots_root = results_root / "plots"
         pretty_ds = _pretty_dataset_name(group_key.dataset_name)
         if group_key.eval_scheme is None:
             out_dir = plots_root / group_key.dataset_name

@@ -15,7 +15,7 @@ uv pip install -r dependencies/requirements_torch.txt
 
 ## Plot test results (clicks + purchase ndcg@10)
 
-- Writes combined plots (rectools + torch) under `logs/plots/{dataset_name}/test_results.png` and, for `persrec_tc5_*`, `logs/plots/{dataset_name}/{eval_scheme}/test_results.png`.
+- Writes combined plots (rectools + torch) under `results/plots/{dataset_name}/test_results.png` and, for `persrec_tc5_*`, `results/plots/{dataset_name}/{eval_scheme}/test_results.png`.
 
 ```bash
 source .venv/bin/activate
