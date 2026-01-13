@@ -31,7 +31,7 @@ lr_2: 0.001
 pretrained_backbone:
   use: true
   pretrained_config_name: baseline
-  backbone_lr: 0.005
+  backbone_lr: null
   backbone_lr_2: 0.001
 
 early_stopping_warmup_ep: 5
