@@ -25,6 +25,43 @@ def sample_negative_actions(min_id: int, max_id_exclusive: int, actions, neg, de
     return neg_actions
 
 
+def sample_negative_actions_by_mu(mu: torch.Tensor, actions: torch.Tensor, neg: int) -> torch.Tensor:
+    if mu.ndim != 1:
+        raise ValueError(f"Expected mu shape [V], got {tuple(mu.shape)}")
+    if actions.ndim != 1:
+        raise ValueError(f"Expected actions shape [N], got {tuple(actions.shape)}")
+    n = int(actions.shape[0])
+    neg = int(neg)
+    if neg <= 0:
+        return torch.empty((n, 0), dtype=actions.dtype, device=actions.device)
+
+    w = mu.to(dtype=torch.float32, device=actions.device)
+    w = w.clone()
+    if w.numel() > 0:
+        w[0] = 0.0
+    w = w.clamp_min(0.0)
+    if float(w.sum().item()) <= 0.0:
+        raise ValueError("mu must have positive mass on non-pad items")
+
+    neg_actions = torch.multinomial(w, num_samples=n * neg, replacement=True).view(n, neg).to(actions.dtype)
+    bad = neg_actions.eq(actions[:, None])
+    while bad.any():
+        k = int(bad.sum().item())
+        neg_actions[bad] = torch.multinomial(w, num_samples=k, replacement=True).to(actions.dtype)
+        bad = neg_actions.eq(actions[:, None])
+    return neg_actions
+
+
+def sample_corrected_policy_index(ce_logits_c: torch.Tensor, mu_c: torch.Tensor, mu_eps: float) -> torch.Tensor:
+    if ce_logits_c.ndim != 2:
+        raise ValueError(f"Expected ce_logits_c shape [N,C], got {tuple(ce_logits_c.shape)}")
+    if mu_c.shape != ce_logits_c.shape:
+        raise ValueError(f"Expected mu_c shape {tuple(ce_logits_c.shape)}, got {tuple(mu_c.shape)}")
+    corr = ce_logits_c - torch.log(mu_c.clamp_min(float(mu_eps)))
+    probs = F.softmax(corr, dim=1)
+    return torch.multinomial(probs, num_samples=1)
+
+
 def train_sa2c(
     *,
     cfg: dict,
@@ -57,6 +94,10 @@ def train_sa2c(
     pointwise_cfg = cfg.get("pointwise_critic") or {}
     use_pointwise_critic = bool(pointwise_cfg.get("use", False))
     pointwise_arch = str(pointwise_cfg.get("arch", "dot"))
+
+    critic_sampling_cfg = cfg.get("critic_sampling") or {}
+    critic_use_pop_policy = bool(critic_sampling_cfg.get("use_pop_policy", False))
+    critic_mu_eps = float(critic_sampling_cfg.get("mu_eps", 1e-12))
 
     qn1 = SASRecQNetworkRectools(
         item_num=item_num,
@@ -220,7 +261,10 @@ def train_sa2c(
                         raise FloatingPointError(f"Non-finite seq encodings at total_step={int(total_step)}")
 
                 critic_n_neg_eff = int(critic_n_neg) if use_sampled_loss else int(cfg.get("neg", 10))
-                crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg_eff, device=device)
+                if critic_use_pop_policy:
+                    crit_negs = sample_negative_actions_by_mu(behavior_prob_table, action_flat, critic_n_neg_eff)
+                else:
+                    crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg_eff, device=device)
                 crit_cands = torch.cat([action_flat[:, None], crit_negs], dim=1)
                 q_curr_c = main_qn.score_q_candidates(seqs_curr_flat, crit_cands)
                 q_curr_tgt_c = target_qn.score_q_candidates(seqs_curr_tgt_flat, crit_cands)
@@ -254,8 +298,14 @@ def train_sa2c(
                 else:
                     reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
 
-                a_star_idx = q_next_selector_c.argmax(dim=1)
-                q_tp1 = q_next_target_c.gather(1, a_star_idx[:, None]).squeeze(1)
+                if critic_use_pop_policy:
+                    ce_next_logits_c = main_qn.score_ce_candidates(seqs_next_selector_flat, crit_cands)
+                    mu_c = behavior_prob_table[crit_cands]
+                    a_star_idx = sample_corrected_policy_index(ce_next_logits_c, mu_c, critic_mu_eps)
+                    q_tp1 = q_next_target_c.gather(1, a_star_idx).squeeze(1)
+                else:
+                    a_star_idx = q_next_selector_c.argmax(dim=1)
+                    q_tp1 = q_next_target_c.gather(1, a_star_idx[:, None]).squeeze(1)
                 target_pos = reward_flat + discount * q_tp1 * (1.0 - done_flat)
                 q_sa = q_curr_c[:, 0]
                 qloss_pos = ((q_sa - target_pos.detach()) ** 2).mean()
