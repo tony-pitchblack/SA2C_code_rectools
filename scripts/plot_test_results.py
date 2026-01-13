@@ -212,13 +212,28 @@ def _plot_group(
     print(str(out_path.resolve()))
 
 
+def _max_metric_for_dataset(dataset_name: str, values: list[float] | None) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return float(values[0])
+    ds = str(dataset_name)
+    if ds == "retailrocket":
+        return float(values[0])
+    if ds == "yoochoose":
+        return float(values[1]) if len(values) > 1 else float(values[0])
+    if ds.startswith("persrec_tc5_"):
+        return float(values[2]) if len(values) > 2 else float(values[-1])
+    return float(values[-1])
+
+
 def _build_plots(
     *,
     logs_root: Path,
     only_script: str | None,
     only_dataset: str | None,
     only_eval_scheme: str | None,
-    max_metric_value: float | None,
+    max_metric_values: list[float] | None,
 ):
     tqdm = _tqdm()
     by_group: dict[_GroupKey, dict[str, dict[str, tuple[float, float, float]]]] = {}
@@ -275,7 +290,7 @@ def _build_plots(
             dataset_name=group_key.dataset_name,
             rows=rows,
             out_path=out_dir / "test_results.png",
-            max_metric_value=max_metric_value,
+            max_metric_value=_max_metric_for_dataset(group_key.dataset_name, max_metric_values),
         )
 
 
@@ -284,7 +299,13 @@ def main() -> None:
     p.add_argument("--script", default=None, choices=["SA2C_SASRec_torch", "SA2C_SASRec_rectools"])
     p.add_argument("--dataset", default=None)
     p.add_argument("--eval-scheme", default=None)
-    p.add_argument("--max-metric-value", default=None, type=float)
+    p.add_argument(
+        "--max-metric-value",
+        nargs="*",
+        type=float,
+        default=None,
+        help="Either a single float (applied to all datasets) or 3 floats: retailrocket yoochoose persrec_tc5.",
+    )
     args = p.parse_args()
 
     logs_root = _repo_root() / "logs"
@@ -296,7 +317,7 @@ def main() -> None:
         only_script=args.script,
         only_dataset=args.dataset,
         only_eval_scheme=args.eval_scheme,
-        max_metric_value=args.max_metric_value,
+        max_metric_values=args.max_metric_value,
     )
 
 
