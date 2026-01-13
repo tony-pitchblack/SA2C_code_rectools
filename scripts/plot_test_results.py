@@ -98,8 +98,7 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
         raise RuntimeError("Missing dependency: matplotlib") from e
 
     color_map = {"torch": "0.6", "rectools": "C3"}
-    rows_p = sorted(rows, key=lambda x: float(x[2]), reverse=True)
-    rows_c = sorted(rows, key=lambda x: float(x[1]), reverse=True)
+    rows = list(rows)
 
     fig_h = max(4.5, 0.35 * max(len(rows), 1) * 2.0 + 1.6)
     fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(12, fig_h), height_ratios=[1.0, 1.0, 0.55])
@@ -117,6 +116,12 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
             "impl:",
             'torch = "reimplementation of author\'s code w/ torch"',
             'rectools = "reimplementation of author\'s code w/ torch + use rectools SASRec model arch"',
+            "",
+            "legend:",
+            'gray bar = "torch"',
+            'red bar = "rectools"',
+            'blue dashed = "paper SASRec"',
+            'green dashed = "paper SASRec-SA2C"',
         ]
     )
 
@@ -127,43 +132,45 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
         vals = ds.get(kind, {})
         if not vals:
             return []
-        h1 = ax.axvline(float(vals["SASRec"]), linestyle="--", linewidth=1.2, color="C0", label="paper SASRec")
+        h1 = ax.axvline(float(vals["SASRec"]), linestyle="--", linewidth=1.2, color="C0")
         h2 = ax.axvline(
-            float(vals["SASRec-SA2C"]), linestyle="--", linewidth=1.2, color="C2", label="paper SASRec-SA2C"
+            float(vals["SASRec-SA2C"]), linestyle="--", linewidth=1.2, color="C2"
         )
         return [h1, h2]
 
     def barh(ax, items: list[tuple[str, float, str]], *, kind: str):
-        labels = [x[0] for x in items]
-        vals = [float(x[1]) for x in items]
-        colors = [color_map.get(str(x[2]), "C7") for x in items]
-        y = list(range(len(labels)))
-        ax.barh(y, vals, color=colors)
-        ax.set_yticks(y, labels=labels)
+        configs = sorted({str(x[0]) for x in items})
+        by_cfg: dict[str, dict[str, float]] = {}
+        for cfg, val, src in items:
+            by_cfg.setdefault(str(cfg), {})[str(src)] = float(val)
+
+        y = list(range(len(configs)))
+        h = 0.35
+        offset = 0.20
+        for i, cfg in enumerate(configs):
+            m = by_cfg.get(cfg, {})
+            if "torch" in m:
+                ax.barh(i - offset, float(m["torch"]), height=h, color=color_map["torch"])
+            if "rectools" in m:
+                ax.barh(i + offset, float(m["rectools"]), height=h, color=color_map["rectools"])
+
+        ax.set_yticks(y, labels=configs)
         ax.invert_yaxis()
         ax.set_xlim(left=0.0)
 
-        legend_handles = []
-        present_sources = {str(x[2]) for x in items}
-        if "torch" in present_sources:
-            legend_handles.append(Patch(color=color_map["torch"], label="torch"))
-        if "rectools" in present_sources:
-            legend_handles.append(Patch(color=color_map["rectools"], label="rectools"))
-
         paper_handles = add_paper_lines(ax, kind)
-        legend_handles.extend(paper_handles)
-        if legend_handles:
-            ax.legend(handles=legend_handles, loc="lower right", frameon=False)
-
-        max_val = max(vals) if vals else 0.0
         max_line = max((float(h.get_xdata()[0]) for h in paper_handles), default=0.0)
+        max_val = 0.0
+        for cfg in configs:
+            for v in by_cfg.get(cfg, {}).values():
+                max_val = max(max_val, float(v))
         xmax = max(max_val, max_line) * 1.05 if max(max_val, max_line) > 0 else 1.0
         ax.set_xlim(left=0.0, right=float(xmax))
 
-    barh(axes[0], [(cfg, p, src) for cfg, _, p, src in rows_p], kind="purchase")
+    barh(axes[0], [(cfg, p, src) for cfg, _, p, src in rows], kind="purchase")
     axes[0].set_title("purchase test/ndcg@10")
 
-    barh(axes[1], [(cfg, c, src) for cfg, c, _, src in rows_c], kind="clicks")
+    barh(axes[1], [(cfg, c, src) for cfg, c, _, src in rows], kind="clicks")
     axes[1].set_title("clicks test/ndcg@10")
 
     axes[2].axis("off")
@@ -178,7 +185,7 @@ def _plot_group(*, title: str, dataset_name: str, rows: list[tuple[str, float, f
 
 def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str | None, only_eval_scheme: str | None):
     tqdm = _tqdm()
-    by_group: dict[_GroupKey, dict[tuple[str, str], tuple[float, float, float]]] = {}
+    by_group: dict[_GroupKey, dict[str, dict[str, tuple[float, float, float]]]] = {}
 
     for script_name in ("SA2C_SASRec_torch", "SA2C_SASRec_rectools"):
         if only_script is not None and script_name != only_script:
@@ -205,23 +212,19 @@ def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str 
 
             mtime = max(float(clicks_path.stat().st_mtime), float(purchase_path.stat().st_mtime))
             group_map = by_group.setdefault(group_key, {})
-            key = (str(config_label), str(source))
-            prev = group_map.get(key)
+            cfg_map = group_map.setdefault(str(config_label), {})
+            prev = cfg_map.get(str(source))
             if prev is None or mtime > float(prev[2]):
-                group_map[key] = (float(clicks), float(purchase), float(mtime))
+                cfg_map[str(source)] = (float(clicks), float(purchase), float(mtime))
 
     for group_key, cfg_map in tqdm(list(by_group.items()), desc="plot", unit="dataset"):
-        tmp = [(cfg, src, v[0], v[1], v[2]) for (cfg, src), v in cfg_map.items()]
-        tmp.sort(key=lambda x: (x[0], x[1]))
-
-        counts: dict[str, int] = {}
-        for cfg, _, *_ in tmp:
-            counts[cfg] = counts.get(cfg, 0) + 1
-
         rows: list[tuple[str, float, float, str]] = []
-        for cfg, src, c, p, _ in tmp:
-            label = cfg if counts.get(cfg, 0) <= 1 else f"{cfg} ({src})"
-            rows.append((label, float(c), float(p), str(src)))
+        for cfg in sorted(cfg_map.keys()):
+            for src in ("torch", "rectools"):
+                v = cfg_map.get(cfg, {}).get(src)
+                if v is None:
+                    continue
+                rows.append((str(cfg), float(v[0]), float(v[1]), str(src)))
 
         plots_root = logs_root / "plots"
         if group_key.eval_scheme is None:
