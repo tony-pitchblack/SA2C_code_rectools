@@ -25,7 +25,7 @@ python scripts/plot_test_results.py  --max-metric-value 0.5
 # examples
 # (omit --dataset to plot all datasets found under logs/)
 python scripts/plot_test_results.py --dataset retailrocket --max-metric-value 0.5
-python scripts/plot_test_results.py --max-metric-value 0.75 0.6 0.2
+python scripts/plot_test_results.py --max-metric-value 1.0 0.6 0.3
 python scripts/plot_test_results.py --script SA2C_SASRec_rectools --dataset persrec_tc5_2025-08-21 --eval-scheme bert4rec_eval
 ```
 
