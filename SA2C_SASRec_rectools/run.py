@@ -11,7 +11,7 @@ import torch
 
 from .artifacts import write_results
 from .cli import parse_args
-from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config
+from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config, validate_pointwise_critic_cfg
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
 from .data_utils.persrec_tc5 import prepare_persrec_tc5
 from .data_utils.sessions import SessionDataset, make_session_loader
@@ -48,9 +48,7 @@ def main():
     if reward_fn not in {"click_buy", "ndcg"}:
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
     enable_sa2c = bool(cfg.get("enable_sa2c", True))
-    pointwise_cfg = cfg.get("pointwise_critic") or {}
-    pointwise_critic_use = bool(pointwise_cfg.get("use", False))
-    pointwise_critic_arch = str(pointwise_cfg.get("arch", "dot"))
+    pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
 
     repo_root = Path(__file__).resolve().parent.parent
     dataset_cfg = cfg.get("dataset", "retailrocket")
@@ -274,6 +272,7 @@ def main():
                 dropout_rate=float(cfg.get("dropout_rate", 0.1)),
                 pointwise_critic_use=pointwise_critic_use,
                 pointwise_critic_arch=pointwise_critic_arch,
+                pointwise_critic_mlp=pointwise_mlp_cfg,
             ).to(device)
         else:
             best_model = SASRecBaselineRectools(
@@ -325,6 +324,7 @@ def main():
                     dropout_rate=float(cfg.get("dropout_rate", 0.1)),
                     pointwise_critic_use=pointwise_critic_use,
                     pointwise_critic_arch=pointwise_critic_arch,
+                    pointwise_critic_mlp=pointwise_mlp_cfg,
                 ).to(device)
                 warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
                 val_warmup = eval_fn(
@@ -418,6 +418,7 @@ def main():
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
             pointwise_critic_use=pointwise_critic_use,
             pointwise_critic_arch=pointwise_critic_arch,
+            pointwise_critic_mlp=pointwise_mlp_cfg,
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
     else:
@@ -488,6 +489,7 @@ def main():
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
             pointwise_critic_use=pointwise_critic_use,
             pointwise_critic_arch=pointwise_critic_arch,
+            pointwise_critic_mlp=pointwise_mlp_cfg,
         ).to(device)
         warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
 

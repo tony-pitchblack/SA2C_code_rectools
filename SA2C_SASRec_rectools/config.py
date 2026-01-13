@@ -51,6 +51,14 @@ def default_config() -> dict:
             "ce_n_negatives": 256,
             "critic_n_negatives": 256,
         },
+        "pointwise_critic": {
+            "use": False,
+            "arch": "dot",
+            "mlp": {
+                "hidden_sizes": [64],
+                "dropout_rate": 0.0,
+            },
+        },
         "bert4rec_loo": {
             "enable": False,
             "val_samples_num": 0,
@@ -101,5 +109,37 @@ def is_persrec_tc5_dataset_cfg(dataset_cfg) -> bool:
     return isinstance(dataset_cfg, dict) and ("calc_date" in dataset_cfg)
 
 
-__all__ = ["default_config", "load_config", "apply_cli_overrides", "is_persrec_tc5_dataset_cfg"]
+def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
+    pointwise_cfg = cfg.get("pointwise_critic") or {}
+    if not isinstance(pointwise_cfg, dict):
+        raise ValueError("pointwise_critic must be a mapping (dict)")
+    use = bool(pointwise_cfg.get("use", False))
+    arch = str(pointwise_cfg.get("arch", "dot"))
+    if arch not in {"dot", "mlp"}:
+        raise ValueError("pointwise_critic.arch must be one of: dot | mlp")
+    if arch != "mlp":
+        return use, arch, None
+
+    mlp_cfg = pointwise_cfg.get("mlp", None)
+    if not isinstance(mlp_cfg, dict):
+        raise ValueError("pointwise_critic.mlp must be provided when pointwise_critic.arch=mlp")
+
+    if "hidden_sizes" not in mlp_cfg:
+        raise ValueError("Missing required config: pointwise_critic.mlp.hidden_sizes")
+    if "dropout_rate" not in mlp_cfg:
+        raise ValueError("Missing required config: pointwise_critic.mlp.dropout_rate")
+
+    hidden_sizes = mlp_cfg.get("hidden_sizes")
+    if not isinstance(hidden_sizes, list) or len(hidden_sizes) == 0 or not all(isinstance(x, int) for x in hidden_sizes):
+        raise ValueError("pointwise_critic.mlp.hidden_sizes must be a non-empty list of ints")
+    dropout_rate = mlp_cfg.get("dropout_rate")
+    try:
+        dropout_rate_f = float(dropout_rate)
+    except Exception as e:
+        raise ValueError("pointwise_critic.mlp.dropout_rate must be a float") from e
+
+    return use, arch, {"hidden_sizes": [int(x) for x in hidden_sizes], "dropout_rate": float(dropout_rate_f)}
+
+
+__all__ = ["default_config", "load_config", "apply_cli_overrides", "is_persrec_tc5_dataset_cfg", "validate_pointwise_critic_cfg"]
 

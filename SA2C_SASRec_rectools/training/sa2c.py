@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import RandomSampler
 
+from ..config import validate_pointwise_critic_cfg
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
 from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
 from ..models import SASRecQNetworkRectools
@@ -91,9 +92,7 @@ def train_sa2c(
     with open(str(pop_dict_path), "r") as f:
         pop_dict = eval(f.read())
 
-    pointwise_cfg = cfg.get("pointwise_critic") or {}
-    use_pointwise_critic = bool(pointwise_cfg.get("use", False))
-    pointwise_arch = str(pointwise_cfg.get("arch", "dot"))
+    use_pointwise_critic, pointwise_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
 
     critic_sampling_cfg = cfg.get("critic_sampling") or {}
     critic_use_pop_policy = bool(critic_sampling_cfg.get("use_pop_policy", False))
@@ -108,6 +107,7 @@ def train_sa2c(
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
         pointwise_critic_use=use_pointwise_critic,
         pointwise_critic_arch=pointwise_arch,
+        pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
     qn2 = SASRecQNetworkRectools(
         item_num=item_num,
@@ -118,6 +118,7 @@ def train_sa2c(
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
         pointwise_critic_use=use_pointwise_critic,
         pointwise_critic_arch=pointwise_arch,
+        pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
 
     opt1_qn1 = torch.optim.Adam(qn1.parameters(), lr=float(cfg.get("lr", 0.005)))

@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import yaml
 
+from .config import validate_pointwise_critic_cfg
 from .logging_utils import configure_logging, dump_config
 from .metrics import evaluate, get_metric_value
 from .models import SASRecBaselineRectools, SASRecQNetworkRectools
@@ -92,9 +93,7 @@ def run_optuna_gridsearch(
 
         try:
             if enable_sa2c:
-                pointwise_cfg = trial_cfg.get("pointwise_critic") or {}
-                pointwise_critic_use = bool(pointwise_cfg.get("use", False))
-                pointwise_critic_arch = str(pointwise_cfg.get("arch", "dot"))
+                pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(trial_cfg)
                 reward_negative_trial = float(trial_cfg.get("r_negative", reward_negative))
                 if pop_dict_path is None:
                     raise ValueError("pop_dict_path is required when enable_sa2c=true")
@@ -130,6 +129,7 @@ def run_optuna_gridsearch(
                     dropout_rate=float(trial_cfg.get("dropout_rate", 0.1)),
                     pointwise_critic_use=pointwise_critic_use,
                     pointwise_critic_arch=pointwise_critic_arch,
+                    pointwise_critic_mlp=pointwise_mlp_cfg,
                 ).to(device)
             else:
                 best_path = train_baseline(
@@ -214,9 +214,7 @@ def run_optuna_gridsearch(
 
         enable_sa2c = bool(best_cfg.get("enable_sa2c", True))
         if enable_sa2c:
-            pointwise_cfg = best_cfg.get("pointwise_critic") or {}
-            pointwise_critic_use = bool(pointwise_cfg.get("use", False))
-            pointwise_critic_arch = str(pointwise_cfg.get("arch", "dot"))
+            pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(best_cfg)
             best_model = SASRecQNetworkRectools(
                 item_num=item_num,
                 state_size=state_size,
@@ -226,6 +224,7 @@ def run_optuna_gridsearch(
                 dropout_rate=float(best_cfg.get("dropout_rate", 0.1)),
                 pointwise_critic_use=pointwise_critic_use,
                 pointwise_critic_arch=pointwise_critic_arch,
+                pointwise_critic_mlp=pointwise_mlp_cfg,
             ).to(device)
         else:
             best_model = SASRecBaselineRectools(
