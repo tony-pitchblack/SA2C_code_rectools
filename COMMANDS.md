@@ -13,6 +13,21 @@ source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
 ```
 
+## Plot test results (clicks + purchase ndcg@10)
+
+- Writes `logs/{script_name}/{dataset_name}/test_results.png` and, for `persrec_tc5_*` rectools runs, `logs/SA2C_SASRec_rectools/{dataset_name}/{eval_scheme}/test_results.png`.
+
+```bash
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
+python scripts/plot_test_results.py
+
+# examples
+# (omit --dataset to plot all datasets found under logs/)
+python scripts/plot_test_results.py --script SA2C_SASRec_torch --dataset retailrocket
+python scripts/plot_test_results.py --script SA2C_SASRec_rectools --dataset persrec_tc5_2025-08-21 --eval-scheme bert4rec_eval
+```
+
 ## retailrocket
 ```bash
 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default.yml

@@ -1,5 +1,7 @@
 requests==2.32.3
 numpy==1.26.4
+pandas
+matplotlib
 fastparquet
 gdownload==0.1.1
 mlflow==3.8.0
