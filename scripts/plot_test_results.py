@@ -16,12 +16,22 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _tqdm():
+    try:
+        from tqdm.auto import tqdm  # type: ignore[import-not-found]
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError("Missing dependency: tqdm") from e
+    return tqdm
+
+
 def _is_persrec_tc5_dataset(dataset_name: str) -> bool:
     return str(dataset_name).startswith("persrec_tc5_")
 
 
 def _iter_result_pairs(root: Path):
-    for clicks_path in root.rglob("results_clicks.csv"):
+    tqdm = _tqdm()
+    clicks_paths = list(root.rglob("results_clicks.csv"))
+    for clicks_path in tqdm(clicks_paths, desc=f"scan {root.name}", unit="run"):
         run_dir = clicks_path.parent
         purchase_path = run_dir / "results_purchase.csv"
         if not purchase_path.exists():
@@ -99,9 +109,11 @@ def _plot_group(*, title: str, rows: list[tuple[str, float, float]], out_path: P
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
+    print(str(out_path.resolve()))
 
 
 def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str | None, only_eval_scheme: str | None):
+    tqdm = _tqdm()
     by_group: dict[_GroupKey, dict[str, tuple[float, float, float]]] = {}
 
     for script_name in ("SA2C_SASRec_torch", "SA2C_SASRec_rectools"):
@@ -132,7 +144,7 @@ def _build_plots(*, logs_root: Path, only_script: str | None, only_dataset: str 
             if prev is None or mtime > float(prev[2]):
                 group_map[config_label] = (float(clicks), float(purchase), float(mtime))
 
-    for group_key, cfg_map in by_group.items():
+    for group_key, cfg_map in tqdm(list(by_group.items()), desc="plot", unit="dataset"):
         rows = [(cfg, v[0], v[1]) for cfg, v in cfg_map.items()]
         rows.sort(key=lambda x: x[0])
 
