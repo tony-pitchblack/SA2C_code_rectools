@@ -19,7 +19,7 @@ from .data_utils.sessions import SessionDataset, make_session_loader
 from .logging_utils import configure_logging, dump_config
 from .models import Albert4Rec, SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
-from .metrics import evaluate, evaluate_albert4rec_loo, evaluate_loo
+from .metrics import evaluate, evaluate_albert4rec_loo, evaluate_loo, evaluate_loo_candidates
 from .gridsearch import run_optuna_gridsearch
 from .training.albert4rec import train_albert4rec
 from .training.baseline import train_baseline
@@ -118,14 +118,13 @@ def main():
 
     bert4rec_loo_cfg = cfg.get("bert4rec_loo") or {}
     use_bert4rec_loo = bool(isinstance(bert4rec_loo_cfg, dict) and bool(bert4rec_loo_cfg.get("enable", False)))
-    val_samples_num = int(bert4rec_loo_cfg.get("val_samples_num", 0)) if use_bert4rec_loo else 0
-    test_samples_num = int(bert4rec_loo_cfg.get("test_samples_num", 0)) if use_bert4rec_loo else 0
+    val_split_samples_num = int(bert4rec_loo_cfg.get("val_samples_num", 0)) if use_bert4rec_loo else 0
+    test_split_samples_num = int(bert4rec_loo_cfg.get("test_samples_num", 0)) if use_bert4rec_loo else 0
     sanity = bool(getattr(args, "sanity", False)) or bool(cfg.get("sanity", False))
     if use_bert4rec_loo and sanity:
         cap = 1000
-        val_samples_num = min(int(val_samples_num), int(cap))
-        test_samples_num = min(int(test_samples_num), int(cap))
-    eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
+        val_split_samples_num = min(int(val_split_samples_num), int(cap))
+        test_split_samples_num = min(int(test_split_samples_num), int(cap))
     if model_type == "albert4rec":
         if not bool(use_bert4rec_loo):
             raise ValueError("albert4rec is supported only with bert4rec_loo.enable=true (bert4rec_eval)")
@@ -179,8 +178,8 @@ def main():
                 dataset_name=dataset_name,
                 dataset_cfg=dict(dataset_cfg),
                 seed=int(cfg.get("seed", 0)),
-                val_samples_num=int(val_samples_num),
-                test_samples_num=int(test_samples_num),
+                val_samples_num=int(val_split_samples_num),
+                test_samples_num=int(test_split_samples_num),
                 limit_chunks_pct=limit_chunks_pct,
             )
         else:
@@ -211,6 +210,48 @@ def main():
             int(cfg.get("num_heads", 1)),
             int(item_num),
         )
+
+    eval_neg_samples_num_cfg = cfg.get("val_samples_num", None)
+    if eval_neg_samples_num_cfg is None:
+        eval_neg_samples_num = None
+    else:
+        eval_neg_samples_num = int(eval_neg_samples_num_cfg)
+        if int(eval_neg_samples_num) < 0:
+            raise ValueError("val_samples_num must be null or a non-negative int")
+
+    sampled_negatives = None
+    if use_bert4rec_loo and model_type != "albert4rec":
+        if eval_neg_samples_num is None:
+            sampled_negatives = torch.arange(1, int(item_num) + 1, device=device, dtype=torch.long)
+        else:
+            with open(str(pop_dict_path), "r") as f:
+                pop_dict = eval(f.read())
+            if not isinstance(pop_dict, dict):
+                raise ValueError("pop_dict must be a dict mapping item_id -> probability")
+            pairs = []
+            for k, v in pop_dict.items():
+                kk = int(k)
+                if 0 <= kk < int(item_num):
+                    pairs.append((kk, float(v)))
+            pairs.sort(key=lambda kv: kv[1], reverse=True)
+            top_ids = [kk + 1 for kk, _ in pairs[: int(min(int(eval_neg_samples_num), int(item_num)))]]
+            sampled_negatives = torch.as_tensor(top_ids, device=device, dtype=torch.long)
+
+    if use_bert4rec_loo and model_type != "albert4rec":
+
+        def eval_fn(model, session_loader, reward_click, reward_buy, device, **kwargs):
+            return evaluate_loo_candidates(
+                model,
+                session_loader,
+                reward_click,
+                reward_buy,
+                device,
+                sampled_negatives=sampled_negatives,
+                **kwargs,
+            )
+
+    else:
+        eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
 
     reward_click = float(cfg.get("r_click", 0.2))
     reward_buy = float(cfg.get("r_buy", 1.0))
@@ -243,8 +284,8 @@ def main():
                 data_directory=data_directory,
                 split_df_names=["sampled_train.df", "sampled_val.df", "sampled_test.df"],
                 seed=int(cfg.get("seed", 0)),
-                val_samples_num=int(val_samples_num),
-                test_samples_num=int(test_samples_num),
+                val_samples_num=int(val_split_samples_num),
+                test_samples_num=int(test_split_samples_num),
                 limit_chunks_pct=limit_chunks_pct,
             )
             train_ds_s = 0.0

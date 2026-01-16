@@ -53,6 +53,7 @@ def default_config() -> dict:
         },
         "discount": 0.5,
         "neg": 10,
+        "val_samples_num": None,
         "sampled_loss": {
             "use": False,
             "ce_n_negatives": 256,
