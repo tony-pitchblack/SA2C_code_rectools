@@ -17,7 +17,7 @@ from ..distributed import broadcast_int, get_local_rank, get_world_size, is_dist
 from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
 from ..models import SASRecQNetworkRectools
 from ..utils import tqdm
-from .sampling import sample_uniform_negatives
+from .sampling import sample_global_uniform_negatives, sample_uniform_negatives
 
 
 def sample_negative_actions_by_mu(mu: torch.Tensor, actions: torch.Tensor, neg: int) -> torch.Tensor:
@@ -344,13 +344,15 @@ def train_sa2c(
                 else:
                     crit_negs = sample_uniform_negatives(actions=action_flat, n_neg=critic_n_neg_eff, item_num=item_num)
                 crit_cands = torch.cat([action_flat[:, None], crit_negs], dim=1)
-                ce_cands = None if ce_n_neg_eff is None else torch.cat(
-                    [
-                        action_flat[:, None],
-                        sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num),
-                    ],
-                    dim=1,
-                )
+                ce_cands = None
+                if ce_n_neg_eff is not None and (ce_vocab_pct is None):
+                    ce_cands = torch.cat(
+                        [
+                            action_flat[:, None],
+                            sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num),
+                        ],
+                        dim=1,
+                    )
 
                 seqs_main, q_curr_c, q_next_selector_c, ce_logits_c, ce_next_logits_c = main_qn(
                     states_x,
@@ -367,8 +369,22 @@ def train_sa2c(
                         crit_cands=crit_cands,
                     )
 
+                if ce_n_neg_eff is not None and (ce_vocab_pct is not None):
+                    base = _unwrap(main_qn)
+                    seqs_curr_flat = seqs_main[valid_mask]
+                    neg_ids = sample_global_uniform_negatives(
+                        n_neg=int(ce_n_neg_eff),
+                        item_num=item_num,
+                        device=device,
+                    )
+                    pos_emb = base.item_emb(action_flat)
+                    pos_logits = (seqs_curr_flat * pos_emb).sum(dim=-1)
+                    neg_emb = base.item_emb(neg_ids)
+                    neg_logits = seqs_curr_flat @ neg_emb.t()
+                    neg_logits = neg_logits.masked_fill(neg_ids[None, :].eq(action_flat[:, None]), float("-inf"))
+                    ce_logits_c = torch.cat([pos_logits[:, None], neg_logits], dim=1)
                 if ce_logits_c is None:
-                    raise RuntimeError("Expected ce_logits_c to be computed in candidate-scoring forward")
+                    raise RuntimeError("Expected ce_logits_c to be computed (candidate or full CE)")
                 if bool(cfg.get("debug", False)):
                     seqs_curr_flat = seqs_main[valid_mask]
                     if not torch.isfinite(seqs_curr_flat).all():
@@ -473,9 +489,18 @@ def train_sa2c(
                     base = _unwrap(main_qn)
                     seqs = base.encode_seq(states_x)
                     seqs_flat = seqs[valid_mask]
-                    ce_negs = sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num)
-                    ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
-                    ce_logits_loss = base.score_ce_candidates(seqs_flat, ce_cands)
+                    if ce_vocab_pct is not None:
+                        neg_ids = sample_global_uniform_negatives(n_neg=int(ce_n_neg_eff), item_num=item_num, device=device)
+                        pos_emb = base.item_emb(action_flat)
+                        pos_logits = (seqs_flat * pos_emb).sum(dim=-1)
+                        neg_emb = base.item_emb(neg_ids)
+                        neg_logits = seqs_flat @ neg_emb.t()
+                        neg_logits = neg_logits.masked_fill(neg_ids[None, :].eq(action_flat[:, None]), float("-inf"))
+                        ce_logits_loss = torch.cat([pos_logits[:, None], neg_logits], dim=1)
+                    else:
+                        ce_negs = sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num)
+                        ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
+                        ce_logits_loss = base.score_ce_candidates(seqs_flat, ce_cands)
                     ce_loss_pre = F.cross_entropy(
                         ce_logits_loss,
                         torch.zeros((int(ce_logits_loss.shape[0]),), dtype=torch.long, device=device),

@@ -15,7 +15,10 @@ uv pip install -r dependencies/requirements_torch.txt
 
 ## Sampled softmax (CE) with 1/4 vocab
 
-- Add `ce_n_negatives: 0.25` to your rectools YAML config (top-level). This makes CE-loss candidates \(1 + \lfloor 0.25 * item\_num \rfloor\).
+- Add `ce_n_negatives: 0.25` to your rectools YAML config (top-level). This sets the number of sampled negatives to \(\lfloor 0.25 * item\_num \rfloor\).
+- Implementation detail: for fractional `ce_n_negatives`, training uses a matmul-based “shared negatives” construction (no per-row `[N,C,H]` embedding gather).
+- `ce_n_negatives: null` means full softmax (scores full vocab).
+- `num_val_negative_samples` (optional) controls eval candidate pool size for `bert4rec_loo` only.
 
 ### persrec_tc5_2025-08-21 (bert4rec_eval)
 

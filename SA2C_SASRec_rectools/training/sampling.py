@@ -25,5 +25,14 @@ def sample_uniform_negatives(*, actions: torch.Tensor, n_neg: int, item_num: int
     return neg_actions
 
 
-__all__ = ["sample_uniform_negatives"]
+def sample_global_uniform_negatives(*, n_neg: int, item_num: int, device: torch.device) -> torch.Tensor:
+    n_neg = int(n_neg)
+    if n_neg <= 0:
+        return torch.empty((0,), dtype=torch.long, device=device)
+    min_id = 1
+    max_id_exclusive = int(item_num) + 1
+    return torch.randint(int(min_id), int(max_id_exclusive), size=(int(n_neg),), device=device, dtype=torch.long)
+
+
+__all__ = ["sample_uniform_negatives", "sample_global_uniform_negatives"]
 

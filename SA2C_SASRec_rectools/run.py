@@ -13,7 +13,14 @@ import torch.multiprocessing as mp
 
 from .artifacts import write_results
 from .cli import parse_args
-from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config, resolve_ce_sampling, validate_pointwise_critic_cfg
+from .config import (
+    apply_cli_overrides,
+    is_persrec_tc5_dataset_cfg,
+    load_config,
+    resolve_ce_sampling,
+    resolve_num_val_negative_samples,
+    validate_pointwise_critic_cfg,
+)
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
 from .data_utils.persrec_tc5 import prepare_persrec_tc5
 from .data_utils.albert4rec import make_albert4rec_loader
@@ -250,13 +257,7 @@ def _worker_main(
 
     ce_loss_vocab_size, ce_full_vocab_size, ce_vocab_pct, _ = resolve_ce_sampling(cfg=cfg, item_num=item_num)
 
-    eval_neg_samples_num_cfg = cfg.get("val_samples_num", None)
-    if eval_neg_samples_num_cfg is None:
-        eval_neg_samples_num = None
-    else:
-        eval_neg_samples_num = int(eval_neg_samples_num_cfg)
-        if int(eval_neg_samples_num) < 0:
-            raise ValueError("val_samples_num must be null or a non-negative int")
+    eval_neg_samples_num, eval_neg_vocab_pct = resolve_num_val_negative_samples(cfg=cfg, item_num=item_num)
 
     sampled_negatives = None
     if use_bert4rec_loo and model_type != "albert4rec":
@@ -273,7 +274,8 @@ def _worker_main(
                 if 0 <= kk < int(item_num):
                     pairs.append((kk, float(v)))
             pairs.sort(key=lambda kv: kv[1], reverse=True)
-            top_ids = [kk + 1 for kk, _ in pairs[: int(min(int(eval_neg_samples_num), int(item_num)))]]
+            k = int(min(int(eval_neg_samples_num), int(item_num)))
+            top_ids = [kk + 1 for kk, _ in pairs[:k]]
             sampled_negatives = torch.as_tensor(top_ids, device=device, dtype=torch.long)
 
     if use_bert4rec_loo and model_type != "albert4rec":

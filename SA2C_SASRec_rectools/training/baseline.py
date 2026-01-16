@@ -16,7 +16,7 @@ from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_s
 from ..metrics import evaluate, get_metric_value
 from ..models import SASRecBaselineRectools
 from ..utils import tqdm
-from .sampling import sample_uniform_negatives
+from .sampling import sample_global_uniform_negatives, sample_uniform_negatives
 
 
 def train_baseline(
@@ -146,13 +146,26 @@ def train_baseline(
                 base = model.module if hasattr(model, "module") else model
                 seqs = base.encode_seq(states_x)
                 seqs_flat = seqs[valid_mask]
-                negs = sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num)
-                cand_ids = torch.cat([action_flat[:, None], negs], dim=1)
-                cand_logits = base.score_ce_candidates(seqs_flat, cand_ids)
-                loss = F.cross_entropy(
-                    cand_logits,
-                    torch.zeros((int(cand_logits.shape[0]),), dtype=torch.long, device=device),
-                )
+                if ce_vocab_pct is not None:
+                    neg_ids = sample_global_uniform_negatives(n_neg=int(ce_n_neg_eff), item_num=item_num, device=device)
+                    pos_emb = base.item_emb(action_flat)
+                    pos_logits = (seqs_flat * pos_emb).sum(dim=-1)
+                    neg_emb = base.item_emb(neg_ids)
+                    neg_logits = seqs_flat @ neg_emb.t()
+                    neg_logits = neg_logits.masked_fill(neg_ids[None, :].eq(action_flat[:, None]), float("-inf"))
+                    cand_logits = torch.cat([pos_logits[:, None], neg_logits], dim=1)
+                    loss = F.cross_entropy(
+                        cand_logits,
+                        torch.zeros((int(cand_logits.shape[0]),), dtype=torch.long, device=device),
+                    )
+                else:
+                    negs = sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num)
+                    cand_ids = torch.cat([action_flat[:, None], negs], dim=1)
+                    cand_logits = base.score_ce_candidates(seqs_flat, cand_ids)
+                    loss = F.cross_entropy(
+                        cand_logits,
+                        torch.zeros((int(cand_logits.shape[0]),), dtype=torch.long, device=device),
+                    )
             if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                 raise FloatingPointError(f"Non-finite loss (baseline) at total_step={int(total_step)}")
 

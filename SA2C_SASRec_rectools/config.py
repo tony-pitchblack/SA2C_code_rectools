@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import yaml
 
 
@@ -53,7 +54,13 @@ def default_config() -> dict:
         },
         "discount": 0.5,
         "neg": 10,
+        # Backward-compat alias for num_val_negative_samples (eval candidate pool size for bert4rec_loo).
         "val_samples_num": None,
+        # Bert4recv1-style: number of eval negatives (popular items) used as candidates.
+        # - null -> full vocabulary candidates
+        # - int  -> use top-K popular items
+        # - float in (0, 1] -> use ceil(vocab * pct) popular items
+        "num_val_negative_samples": None,
         "ce_n_negatives": None,
         "sampled_loss": {
             "use": False,
@@ -161,6 +168,42 @@ def resolve_ce_sampling(*, cfg: dict, item_num: int) -> tuple[int, int, float | 
     return 1 + nneg, full_vocab, float(x), nneg
 
 
+def resolve_num_val_negative_samples(*, cfg: dict, item_num: int) -> tuple[int | None, float | None]:
+    """
+    Bert4recv1-style eval candidate pool size (shared negatives list):
+    - None -> full vocab
+    - int  -> top-K popular items
+    - float in (0,1] -> ceil(item_num * pct)
+    """
+    raw = cfg.get("num_val_negative_samples", None)
+    if raw is None and ("val_samples_num" in cfg):
+        raw = cfg.get("val_samples_num", None)
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool):
+        return None, None
+    if isinstance(raw, int):
+        k = int(raw)
+        if k < 0:
+            raise ValueError("num_val_negative_samples must be null or a non-negative int/float")
+        return k, None
+    try:
+        x = float(raw)
+    except Exception as e:
+        raise ValueError("num_val_negative_samples must be null or a non-negative int/float") from e
+    if x < 0.0:
+        raise ValueError("num_val_negative_samples must be null or a non-negative int/float")
+    if x == 0.0:
+        return 0, 0.0
+    if 0.0 < x <= 1.0:
+        k = int(np.ceil(float(item_num) * float(x)))
+        return max(0, min(int(k), int(item_num))), float(x)
+    if float(x).is_integer():
+        k = int(x)
+        return max(0, min(int(k), int(item_num))), None
+    raise ValueError("num_val_negative_samples as float must be in (0,1] or an integer-valued float")
+
+
 def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
     pointwise_cfg = cfg.get("pointwise_critic") or {}
     if not isinstance(pointwise_cfg, dict):
@@ -200,5 +243,6 @@ __all__ = [
     "is_persrec_tc5_dataset_cfg",
     "validate_pointwise_critic_cfg",
     "resolve_ce_sampling",
+    "resolve_num_val_negative_samples",
 ]
 
