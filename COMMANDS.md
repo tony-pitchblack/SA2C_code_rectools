@@ -13,6 +13,19 @@ source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
 ```
 
+## Sampled softmax (CE) with 1/4 vocab
+
+- Add `ce_n_negatives: 0.25` to your rectools YAML config (top-level). This makes CE-loss candidates \(1 + \lfloor 0.25 * item\_num \rfloor\).
+
+### persrec_tc5_2025-08-21 (bert4rec_eval)
+
+```bash
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_approx_hparams_chunks-pct=0.1.yml
+```
+
 ## Plot test results (clicks + purchase ndcg@10)
 
 - Writes combined plots (rectools + torch) under `results/plots/{dataset_name}/test_results.png` and, for `persrec_tc5_*`, `results/plots/{dataset_name}/{eval_scheme}/test_results.png`.

@@ -82,6 +82,26 @@ def ndcg_reward_from_logits(ce_logits: torch.Tensor, action_t: torch.Tensor) -> 
     return 1.0 / torch.log2(rank + 1.0)
 
 
+def _log_ce_vocab(
+    logger: logging.Logger,
+    *,
+    ce_loss_vocab_size: int | None,
+    ce_full_vocab_size: int | None,
+    ce_vocab_pct: float | None,
+) -> None:
+    if ce_loss_vocab_size is None:
+        return
+    if ce_vocab_pct is not None and ce_full_vocab_size is not None:
+        logger.info(
+            "ce_loss_vocab_size=%d (full=%d vocab_pct=%s)",
+            int(ce_loss_vocab_size),
+            int(ce_full_vocab_size),
+            str(ce_vocab_pct),
+        )
+    else:
+        logger.info("ce_loss_vocab_size=%d", int(ce_loss_vocab_size))
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -97,6 +117,9 @@ def evaluate(
     debug: bool = False,
     epoch=None,
     num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ):
     total_clicks = 0.0
     total_purchase = 0.0
@@ -187,6 +210,12 @@ def evaluate(
         prefix = ""
     logger.info("#############################################################")
     logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -218,6 +247,9 @@ def evaluate_loo(
     debug: bool = False,
     epoch=None,
     num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ):
     total_clicks = 0.0
     total_purchase = 0.0
@@ -308,6 +340,12 @@ def evaluate_loo(
         prefix = ""
     logger.info("#############################################################")
     logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -340,6 +378,9 @@ def evaluate_loo_candidates(
     debug: bool = False,
     epoch=None,
     num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ):
     if sampled_negatives.ndim != 1:
         raise ValueError(f"sampled_negatives must have shape [N], got {tuple(sampled_negatives.shape)}")
@@ -439,6 +480,12 @@ def evaluate_loo_candidates(
         prefix = ""
     logger.info("#############################################################")
     logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -470,6 +517,9 @@ def evaluate_albert4rec_loo(
     debug: bool = False,
     epoch=None,
     num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ):
     _ = purchase_only
     total_clicks = 0.0
@@ -568,6 +618,12 @@ def evaluate_albert4rec_loo(
         prefix = ""
     logger.info("#############################################################")
     logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")

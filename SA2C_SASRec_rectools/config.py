@@ -54,6 +54,7 @@ def default_config() -> dict:
         "discount": 0.5,
         "neg": 10,
         "val_samples_num": None,
+        "ce_n_negatives": None,
         "sampled_loss": {
             "use": False,
             "ce_n_negatives": 256,
@@ -122,6 +123,44 @@ def is_persrec_tc5_dataset_cfg(dataset_cfg) -> bool:
     return isinstance(dataset_cfg, dict) and ("calc_date" in dataset_cfg)
 
 
+def _resolve_ce_n_negatives_cfg(cfg: dict):
+    if "ce_n_negatives" in cfg:
+        v = cfg.get("ce_n_negatives", None)
+        if v is not None:
+            return v
+    sampled_cfg = cfg.get("sampled_loss") or {}
+    if isinstance(sampled_cfg, dict) and ("ce_n_negatives" in sampled_cfg):
+        return sampled_cfg.get("ce_n_negatives", None)
+    return None
+
+
+def resolve_ce_sampling(*, cfg: dict, item_num: int) -> tuple[int, int, float | None, int | None]:
+    full_vocab = int(item_num)
+    raw = _resolve_ce_n_negatives_cfg(cfg)
+    if raw is None:
+        return full_vocab, full_vocab, None, None
+    if isinstance(raw, bool):
+        return full_vocab, full_vocab, None, None
+    try:
+        if isinstance(raw, int):
+            nneg = int(raw)
+            if nneg <= 0:
+                return 1, full_vocab, None, 0
+            return 1 + nneg, full_vocab, None, nneg
+        x = float(raw)
+    except Exception:
+        return full_vocab, full_vocab, None, None
+
+    if x >= 1.0:
+        return full_vocab, full_vocab, None, None
+    if x <= 0.0:
+        return 1, full_vocab, 0.0, 0
+    nneg = int(full_vocab * x)
+    if nneg <= 0:
+        return 1, full_vocab, float(x), 0
+    return 1 + nneg, full_vocab, float(x), nneg
+
+
 def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
     pointwise_cfg = cfg.get("pointwise_critic") or {}
     if not isinstance(pointwise_cfg, dict):
@@ -154,5 +193,12 @@ def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
     return use, arch, {"hidden_sizes": [int(x) for x in hidden_sizes], "dropout_rate": float(dropout_rate_f)}
 
 
-__all__ = ["default_config", "load_config", "apply_cli_overrides", "is_persrec_tc5_dataset_cfg", "validate_pointwise_critic_cfg"]
+__all__ = [
+    "default_config",
+    "load_config",
+    "apply_cli_overrides",
+    "is_persrec_tc5_dataset_cfg",
+    "validate_pointwise_critic_cfg",
+    "resolve_ce_sampling",
+]
 

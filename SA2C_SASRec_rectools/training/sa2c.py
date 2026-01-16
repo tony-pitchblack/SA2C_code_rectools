@@ -11,22 +11,13 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import RandomSampler
 
-from ..config import validate_pointwise_critic_cfg
+from ..config import resolve_ce_sampling, validate_pointwise_critic_cfg
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
 from ..distributed import broadcast_int, get_local_rank, get_world_size, is_distributed, is_rank0
 from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
 from ..models import SASRecQNetworkRectools
 from ..utils import tqdm
-
-
-def sample_negative_actions(min_id: int, max_id_exclusive: int, actions, neg, device):
-    bsz = actions.shape[0]
-    neg_actions = torch.randint(int(min_id), int(max_id_exclusive), size=(bsz, neg), device=device)
-    bad = neg_actions.eq(actions[:, None])
-    while bad.any():
-        neg_actions[bad] = torch.randint(int(min_id), int(max_id_exclusive), size=(int(bad.sum().item()),), device=device)
-        bad = neg_actions.eq(actions[:, None])
-    return neg_actions
+from .sampling import sample_uniform_negatives
 
 
 def sample_negative_actions_by_mu(mu: torch.Tensor, actions: torch.Tensor, neg: int) -> torch.Tensor:
@@ -107,6 +98,9 @@ def train_sa2c(
     metric_key: str = "overall.ndcg@10",
     trial=None,
     continue_training: bool = False,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ) -> tuple[Path, Path | None]:
     logger = logging.getLogger(__name__)
     with open(str(pop_dict_path), "r") as f:
@@ -200,6 +194,11 @@ def train_sa2c(
         if 0 <= kk < item_num:
             behavior_prob_table[kk + 1] = float(v)
     behavior_prob_table = behavior_prob_table.to(device)
+
+    if ce_loss_vocab_size is None or ce_full_vocab_size is None:
+        ce_loss_vocab_size, ce_full_vocab_size, ce_vocab_pct, ce_n_neg_eff = resolve_ce_sampling(cfg=cfg, item_num=item_num)
+    else:
+        _, _, _, ce_n_neg_eff = resolve_ce_sampling(cfg=cfg, item_num=item_num)
 
     early_patience = int(cfg.get("early_stopping_ep", 5))
     warmup_patience_cfg = cfg.get("early_stopping_warmup_ep", None)
@@ -319,7 +318,6 @@ def train_sa2c(
 
             sampled_cfg = cfg.get("sampled_loss") or {}
             use_sampled_loss = bool(sampled_cfg.get("use", False))
-            ce_n_neg = int(sampled_cfg.get("ce_n_negatives", 256))
             critic_n_neg = int(sampled_cfg.get("critic_n_negatives", 256))
             use_pointwise_branch = use_pointwise_critic
 
@@ -344,19 +342,22 @@ def train_sa2c(
                 if critic_use_pop_policy:
                     crit_negs = sample_negative_actions_by_mu(behavior_prob_table, action_flat, critic_n_neg_eff)
                 else:
-                    crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg_eff, device=device)
+                    crit_negs = sample_uniform_negatives(actions=action_flat, n_neg=critic_n_neg_eff, item_num=item_num)
                 crit_cands = torch.cat([action_flat[:, None], crit_negs], dim=1)
-                ce_cands = None
-                if use_sampled_loss:
-                    ce_negs = sample_negative_actions(1, item_num + 1, action_flat, ce_n_neg, device=device)
-                    ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
+                ce_cands = None if ce_n_neg_eff is None else torch.cat(
+                    [
+                        action_flat[:, None],
+                        sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num),
+                    ],
+                    dim=1,
+                )
 
                 seqs_main, q_curr_c, q_next_selector_c, ce_logits_c, ce_next_logits_c = main_qn(
                     states_x,
                     valid_mask=valid_mask,
                     crit_cands=crit_cands,
                     ce_cands=ce_cands,
-                    return_full_ce=(not use_sampled_loss),
+                    return_full_ce=(ce_n_neg_eff is None),
                     ce_next_cands=(crit_cands if critic_use_pop_policy else None),
                 )
                 with torch.no_grad():
@@ -381,7 +382,7 @@ def train_sa2c(
 
                 if reward_fn == "ndcg":
                     with torch.no_grad():
-                        if use_sampled_loss:
+                        if ce_n_neg_eff is not None:
                             base = _unwrap(main_qn)
                             ce_full_seq = seqs_main @ base.item_emb.weight.t()
                             ce_full_seq[:, :, int(getattr(base, "pad_id", 0))] = float("-inf")
@@ -411,7 +412,7 @@ def train_sa2c(
                 q_sneg = q_curr_c[:, 1:]
                 qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
 
-                if use_sampled_loss:
+                if ce_n_neg_eff is not None:
                     ce_loss_pre = F.cross_entropy(
                         ce_logits_c,
                         torch.zeros((int(ce_logits_c.shape[0]),), dtype=torch.long, device=device),
@@ -462,11 +463,26 @@ def train_sa2c(
                 q_t_star = q_curr_tgt_flat.gather(1, a_star_curr[:, None]).squeeze(1)
                 target_neg = float(reward_negative) + discount * q_t_star
                 neg_count = int(cfg.get("neg", 10))
-                neg_actions = sample_negative_actions(1, item_num + 1, action_flat, neg_count, device=device)
+                neg_actions = sample_uniform_negatives(actions=action_flat, n_neg=neg_count, item_num=item_num)
                 q_sneg = q_curr_flat.gather(1, neg_actions)
                 qloss_neg = ((q_sneg - target_neg.detach()[:, None]) ** 2).sum(dim=1).mean()
 
-                ce_loss_pre = F.cross_entropy(ce_flat, action_flat, reduction="none")
+                if ce_n_neg_eff is None:
+                    ce_loss_pre = F.cross_entropy(ce_flat, action_flat, reduction="none")
+                else:
+                    base = _unwrap(main_qn)
+                    seqs = base.encode_seq(states_x)
+                    seqs_flat = seqs[valid_mask]
+                    ce_negs = sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num)
+                    ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
+                    ce_logits_loss = base.score_ce_candidates(seqs_flat, ce_cands)
+                    ce_loss_pre = F.cross_entropy(
+                        ce_logits_loss,
+                        torch.zeros((int(ce_logits_loss.shape[0]),), dtype=torch.long, device=device),
+                        reduction="none",
+                    )
+                    with torch.no_grad():
+                        prob = F.softmax(ce_logits_loss, dim=1)[:, 0]
 
             if in_warmup:
                 loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
@@ -478,7 +494,7 @@ def train_sa2c(
                 total_step += int(step_count)
             else:
                 with torch.no_grad():
-                    if not (use_sampled_loss or use_pointwise_branch):
+                    if (ce_n_neg_eff is None) and (not (use_sampled_loss or use_pointwise_branch)):
                         prob = F.softmax(ce_flat, dim=1).gather(1, action_flat[:, None]).squeeze(1)
                 behavior_prob = behavior_prob_table[action_flat]
                 ips = (prob / behavior_prob).clamp(0.1, 10.0).pow(float(cfg.get("smooth", 0.0)))
@@ -519,6 +535,9 @@ def train_sa2c(
             purchase_only=purchase_only,
             epoch=int(epoch_idx + 1),
             num_epochs=int(num_epochs),
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         metric_1 = float(get_metric_value(val_metrics, metric_key))
         _logger = logging.getLogger(__name__)
@@ -538,6 +557,9 @@ def train_sa2c(
                 purchase_only=purchase_only,
                 epoch=int(epoch_idx + 1),
                 num_epochs=int(num_epochs),
+                ce_loss_vocab_size=ce_loss_vocab_size,
+                ce_full_vocab_size=ce_full_vocab_size,
+                ce_vocab_pct=ce_vocab_pct,
             )
         finally:
             _logger.disabled = _prev_disabled

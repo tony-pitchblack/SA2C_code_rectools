@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 import yaml
 
-from .config import validate_pointwise_critic_cfg
+from .config import resolve_ce_sampling, validate_pointwise_critic_cfg
 from .logging_utils import configure_logging, dump_config
 from .metrics import evaluate, get_metric_value
 from .models import SASRecBaselineRectools, SASRecQNetworkRectools
@@ -82,6 +82,8 @@ def run_optuna_gridsearch(
         if max_steps_per_run > 0:
             trial_cfg["max_steps"] = int(max_steps_per_run)
 
+        ce_loss_vocab_size, ce_full_vocab_size, ce_vocab_pct, _ = resolve_ce_sampling(cfg=trial_cfg, item_num=item_num)
+
         trial_run_dir = gs_dir / f"trial_{int(trial.number):04d}"
         trial_run_dir.mkdir(parents=True, exist_ok=True)
         configure_logging(trial_run_dir, debug=bool(trial_cfg.get("debug", False)))
@@ -119,6 +121,9 @@ def run_optuna_gridsearch(
                     reward_fn=reward_fn,
                     metric_key=metric_key,
                     trial=trial,
+                    ce_loss_vocab_size=ce_loss_vocab_size,
+                    ce_full_vocab_size=ce_full_vocab_size,
+                    ce_vocab_pct=ce_vocab_pct,
                 )
                 model = SASRecQNetworkRectools(
                     item_num=item_num,
@@ -151,6 +156,9 @@ def run_optuna_gridsearch(
                     max_steps=max_steps,
                     metric_key=metric_key,
                     trial=trial,
+                    ce_loss_vocab_size=ce_loss_vocab_size,
+                    ce_full_vocab_size=ce_full_vocab_size,
+                    ce_vocab_pct=ce_vocab_pct,
                 )
                 model = SASRecBaselineRectools(
                     item_num=item_num,
@@ -173,6 +181,9 @@ def run_optuna_gridsearch(
                 state_size=state_size,
                 item_num=item_num,
                 purchase_only=purchase_only,
+                ce_loss_vocab_size=ce_loss_vocab_size,
+                ce_full_vocab_size=ce_full_vocab_size,
+                ce_vocab_pct=ce_vocab_pct,
             )
             score = float(get_metric_value(val_best, metric_key))
             trial.set_user_attr("best_model_path", str(best_path))
@@ -213,6 +224,7 @@ def run_optuna_gridsearch(
         dump_config(best_cfg, best_dir)
 
         enable_sa2c = bool(best_cfg.get("enable_sa2c", True))
+        ce_loss_vocab_size, ce_full_vocab_size, ce_vocab_pct, _ = resolve_ce_sampling(cfg=best_cfg, item_num=item_num)
         if enable_sa2c:
             pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(best_cfg)
             best_model = SASRecQNetworkRectools(
@@ -247,6 +259,9 @@ def run_optuna_gridsearch(
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         test_best = evaluate(
             best_model,
@@ -259,6 +274,9 @@ def run_optuna_gridsearch(
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         from .artifacts import write_results
 

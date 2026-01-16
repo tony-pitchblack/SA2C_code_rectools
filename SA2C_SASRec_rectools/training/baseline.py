@@ -10,11 +10,13 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import RandomSampler
 
+from ..config import resolve_ce_sampling
 from ..distributed import get_local_rank, get_world_size, is_distributed, is_rank0
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
 from ..metrics import evaluate, get_metric_value
 from ..models import SASRecBaselineRectools
 from ..utils import tqdm
+from .sampling import sample_uniform_negatives
 
 
 def train_baseline(
@@ -38,6 +40,9 @@ def train_baseline(
     evaluate_fn=None,
     metric_key: str = "overall.ndcg@10",
     trial=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -57,6 +62,10 @@ def train_baseline(
         local_rank = int(get_local_rank())
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
     opt = torch.optim.Adam(model.parameters(), lr=float(cfg.get("lr", 0.005)))
+    if ce_loss_vocab_size is None or ce_full_vocab_size is None:
+        ce_loss_vocab_size, ce_full_vocab_size, ce_vocab_pct, ce_n_neg_eff = resolve_ce_sampling(cfg=cfg, item_num=item_num)
+    else:
+        _, _, _, ce_n_neg_eff = resolve_ce_sampling(cfg=cfg, item_num=item_num)
 
     total_step = 0
     early_patience = int(cfg.get("early_stopping_ep", 5))
@@ -129,9 +138,21 @@ def train_baseline(
             valid_mask = step["valid_mask"].to(device, non_blocking=pin_memory)
 
             action_flat = actions[valid_mask]
-            ce_logits_seq = model(states_x)
-            ce_logits = ce_logits_seq[valid_mask]
-            loss = F.cross_entropy(ce_logits, action_flat)
+            if ce_n_neg_eff is None:
+                ce_logits_seq = model(states_x)
+                ce_logits = ce_logits_seq[valid_mask]
+                loss = F.cross_entropy(ce_logits, action_flat)
+            else:
+                base = model.module if hasattr(model, "module") else model
+                seqs = base.encode_seq(states_x)
+                seqs_flat = seqs[valid_mask]
+                negs = sample_uniform_negatives(actions=action_flat, n_neg=int(ce_n_neg_eff), item_num=item_num)
+                cand_ids = torch.cat([action_flat[:, None], negs], dim=1)
+                cand_logits = base.score_ce_candidates(seqs_flat, cand_ids)
+                loss = F.cross_entropy(
+                    cand_logits,
+                    torch.zeros((int(cand_logits.shape[0]),), dtype=torch.long, device=device),
+                )
             if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                 raise FloatingPointError(f"Non-finite loss (baseline) at total_step={int(total_step)}")
 
@@ -154,6 +175,9 @@ def train_baseline(
             purchase_only=purchase_only,
             epoch=int(epoch_idx + 1),
             num_epochs=int(num_epochs),
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         metric = float(get_metric_value(val_metrics, metric_key))
         if trial is not None:

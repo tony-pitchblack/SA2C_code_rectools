@@ -13,7 +13,7 @@ import torch.multiprocessing as mp
 
 from .artifacts import write_results
 from .cli import parse_args
-from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config, validate_pointwise_critic_cfg
+from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config, resolve_ce_sampling, validate_pointwise_critic_cfg
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
 from .data_utils.persrec_tc5 import prepare_persrec_tc5
 from .data_utils.albert4rec import make_albert4rec_loader
@@ -248,6 +248,8 @@ def _worker_main(
             int(item_num),
         )
 
+    ce_loss_vocab_size, ce_full_vocab_size, ce_vocab_pct, _ = resolve_ce_sampling(cfg=cfg, item_num=item_num)
+
     eval_neg_samples_num_cfg = cfg.get("val_samples_num", None)
     if eval_neg_samples_num_cfg is None:
         eval_neg_samples_num = None
@@ -462,6 +464,9 @@ def _worker_main(
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         test_best = eval_fn_eff(
             best_model,
@@ -474,6 +479,9 @@ def _worker_main(
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
 
         val_warmup = None
@@ -506,6 +514,9 @@ def _worker_main(
                     state_size=state_size,
                     item_num=item_num,
                     purchase_only=purchase_only,
+                    ce_loss_vocab_size=ce_loss_vocab_size,
+                    ce_full_vocab_size=ce_full_vocab_size,
+                    ce_vocab_pct=ce_vocab_pct,
                 )
                 test_warmup = eval_fn(
                     warmup_model,
@@ -518,6 +529,9 @@ def _worker_main(
                     state_size=state_size,
                     item_num=item_num,
                     purchase_only=purchase_only,
+                    ce_loss_vocab_size=ce_loss_vocab_size,
+                    ce_full_vocab_size=ce_full_vocab_size,
+                    ce_vocab_pct=ce_vocab_pct,
                 )
 
         write_results(
@@ -614,6 +628,9 @@ def _worker_main(
             reward_fn=reward_fn,
             evaluate_fn=eval_fn,
             continue_training=continue_training,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         best_model = SASRecQNetworkRectools(
             item_num=item_num,
@@ -646,6 +663,9 @@ def _worker_main(
             pin_memory=pin_memory,
             max_steps=max_steps,
             evaluate_fn=eval_fn,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         warmup_path = None
         best_model = SASRecBaselineRectools(
@@ -677,6 +697,9 @@ def _worker_main(
         state_size=state_size,
         item_num=item_num,
         purchase_only=purchase_only,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
     )
     test_best = eval_fn_eff(
         best_model,
@@ -689,6 +712,9 @@ def _worker_main(
         state_size=state_size,
         item_num=item_num,
         purchase_only=purchase_only,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
     )
 
     val_warmup = None
@@ -718,6 +744,9 @@ def _worker_main(
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         test_warmup = eval_fn(
             warmup_model,
@@ -730,6 +759,9 @@ def _worker_main(
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
 
     write_results(
