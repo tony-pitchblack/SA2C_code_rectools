@@ -24,7 +24,7 @@ batch_size_train: 600
 batch_size_val: 128
 num_workers_train: 4
 num_workers_val: 0
-device_id: 6
+device_id: cuda:0
 
 # tuned
 lr: "float(1e-4, 1e-2, log=true)"

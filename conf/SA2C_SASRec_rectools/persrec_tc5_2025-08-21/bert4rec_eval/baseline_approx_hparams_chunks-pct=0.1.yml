@@ -11,21 +11,23 @@ bert4rec_loo:
   val_samples_num: 100_000
   test_samples_num: 100_000
 data: data
-epoch: 80
+epoch: 50
 enable_sa2c: false
 
 purchase_only: false
 
-batch_size_train: 400
+batch_size_train: 140
 batch_size_val: 128
 num_workers_train: 0
 num_workers_val: 0
 device_id: cuda:0
 
-hidden_factor: 64
-num_heads: 1
-num_blocks: 1
-dropout_rate: 0.1
+limit_chunks_pct: 0.1
+
+hidden_factor: 256
+num_heads: 8
+num_blocks: 4
+dropout_rate: 0.2
 
 r_click: 0.2
 r_buy: 1.0
@@ -36,7 +38,7 @@ weight: 1.0
 smooth: 0.0
 clip: 0.0
 
-lr: 0.005
+lr: 0.001
 lr_2: 0.001
 
 sampled_loss:

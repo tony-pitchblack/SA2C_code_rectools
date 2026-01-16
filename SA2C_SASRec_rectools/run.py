@@ -151,10 +151,7 @@ def main():
         train_num_workers = 0
         val_num_workers = 0
     else:
-        if torch.cuda.is_available():
-            device = torch.device(f"cuda:{int(cfg.get('device_id', 0))}")
-        else:
-            device = torch.device("cpu")
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
     if bool(cfg.get("debug", False)) and device.type == "cuda":
         torch.backends.cuda.enable_flash_sdp(False)

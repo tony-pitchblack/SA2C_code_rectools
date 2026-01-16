@@ -10,7 +10,7 @@ batch_size_train: 128
 batch_size_val: 256
 num_workers_train: 4
 num_workers_val: 0
-device_id: 3
+device_id: cuda:0
 
 hidden_factor: 64
 num_heads: 1
