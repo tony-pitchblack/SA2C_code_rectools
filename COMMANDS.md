@@ -122,6 +122,13 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 - If missing, downloads from `<dataset.hdfs_working_prefix>/training/dataset_train.parquet` (tries `hdfs dfs -get`, then `hadoop fs -get`).
 - Add `--sanity` to any command to create/use `_sanity` artifacts without touching regular artifacts.
 
+## PLU distribution diagnostics (persrec_tc5 parquet)
+
+```bash
+source .venv/bin/activate
+python scripts/plu_distribution.py --local-working-prefix data/persrec_tc5_2025-08-21
+```
+
 ```bash
 # sa2c_eval/
 source .venv/bin/activate
