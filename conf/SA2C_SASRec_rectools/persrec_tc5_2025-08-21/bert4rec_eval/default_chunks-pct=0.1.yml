@@ -20,7 +20,7 @@ limit_chunks_pct: 0.1
 
 purchase_only: false
 
-batch_size_train: 400
+batch_size_train: 128
 batch_size_val: 128
 num_workers_train: 0
 num_workers_val: 0
