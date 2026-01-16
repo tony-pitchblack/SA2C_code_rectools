@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.dataset as ds
+from tqdm.auto import tqdm
 
 
 def _pct(part: int, total: int) -> float:
@@ -99,7 +101,12 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--local-working-prefix", required=True)
     p.add_argument("--product-column", default="product_id")
+    p.add_argument("--log-level", default="INFO")
+    p.add_argument("--no-tqdm", action="store_true")
     args = p.parse_args()
+
+    logging.basicConfig(level=str(args.log_level).upper(), format="[%(asctime)s] %(levelname)s - %(message)s")
+    logger = logging.getLogger(__name__)
 
     root = Path(str(args.local_working_prefix)).expanduser().resolve()
     parquet_dir = root / "dataset_train.parquet"
@@ -110,6 +117,13 @@ def main() -> None:
     product_column = str(args.product_column)
     if product_column not in dataset.schema.names:
         raise KeyError(f"Missing column {product_column!r} in parquet schema: {dataset.schema.names}")
+
+    logger.info("parquet_dir=%s", str(parquet_dir))
+    logger.info("product_column=%s", str(product_column))
+    try:
+        logger.info("parquet_schema=%s", dataset.schema)
+    except Exception:
+        pass
 
     unique_tokens: set[int] = set()
 
@@ -122,7 +136,11 @@ def main() -> None:
     seq_non_plu_frac_sum = 0.0
 
     scanner = dataset.scanner(columns=[product_column], batch_size=1024)
-    for batch in scanner.to_batches():
+    logger.info("scan_start")
+    it = scanner.to_batches()
+    if not bool(args.no_tqdm):
+        it = tqdm(it, desc="scan parquet", unit="batch", dynamic_ncols=True)
+    for batch in it:
         table = pa.Table.from_batches([batch])
         arrays = _iter_token_arrays(table, product_column)
         for arr in arrays:
@@ -148,6 +166,18 @@ def main() -> None:
                     seq_plu_frac_sum += float(frac_plu.sum())
                     seq_non_plu_frac_sum += float((1.0 - frac_plu).sum())
                     seq_count += int(frac_plu.size)
+
+        if not bool(args.no_tqdm) and hasattr(it, "set_postfix"):
+            try:
+                it.set_postfix(
+                    tokens=int(total_tokens),
+                    unique=int(len(unique_tokens)),
+                    seqs=int(seq_count),
+                )
+            except Exception:
+                pass
+
+    logger.info("scan_done tokens=%d unique=%d seqs=%d", int(total_tokens), int(len(unique_tokens)), int(seq_count))
 
     uniq_total = int(len(unique_tokens))
     uniq_plu_total = int(sum(1 for x in unique_tokens if int(x) >= 0))
