@@ -158,12 +158,47 @@ class SASRecQNetworkRectools(nn.Module):
         causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
         self.register_buffer("causal_attn_mask", causal, persistent=False)
 
-    def forward(self, inputs: torch.Tensor, len_state: Optional[torch.Tensor] = None):
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        len_state: Optional[torch.Tensor] = None,
+        *,
+        valid_mask: Optional[torch.Tensor] = None,
+        crit_cands: Optional[torch.Tensor] = None,
+        ce_cands: Optional[torch.Tensor] = None,
+        return_full_ce: bool = False,
+        ce_next_cands: Optional[torch.Tensor] = None,
+    ):
         bsz, seqlen = inputs.shape
         if seqlen != self.state_size:
             raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
 
         seqs = self.encode_seq(inputs)
+
+        if valid_mask is not None or crit_cands is not None:
+            if valid_mask is None or crit_cands is None:
+                raise ValueError("candidate-scoring forward requires valid_mask and crit_cands")
+            seqs_next = torch.zeros_like(seqs)
+            seqs_next[:, :-1, :] = seqs[:, 1:, :]
+            seqs_curr_flat = seqs[valid_mask]
+            seqs_next_flat = seqs_next[valid_mask]
+
+            q_curr_c = self.score_q_candidates(seqs_curr_flat, crit_cands)
+            q_next_c = self.score_q_candidates(seqs_next_flat, crit_cands)
+
+            ce_logits = None
+            if ce_cands is not None:
+                ce_logits = self.score_ce_candidates(seqs_curr_flat, ce_cands)
+            elif bool(return_full_ce):
+                ce_full_seq = seqs @ self.item_emb.weight.t()
+                ce_full_seq[:, :, self.pad_id] = float("-inf")
+                ce_logits = ce_full_seq[valid_mask]
+
+            ce_next_logits = None
+            if ce_next_cands is not None:
+                ce_next_logits = self.score_ce_candidates(seqs_next_flat, ce_next_cands)
+            return seqs, q_curr_c, q_next_c, ce_logits, ce_next_logits
+
         ce_logits_seq = seqs @ self.item_emb.weight.t()
         ce_logits_seq[:, :, self.pad_id] = float("-inf")
         if self.pointwise_critic_use:

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import RandomSampler
 
 from ..config import validate_pointwise_critic_cfg
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
+from ..distributed import broadcast_int, get_local_rank, get_world_size, is_distributed, is_rank0
 from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
 from ..models import SASRecQNetworkRectools
 from ..utils import tqdm
@@ -109,6 +112,12 @@ def train_sa2c(
     with open(str(pop_dict_path), "r") as f:
         pop_dict = eval(f.read())
 
+    world_size = int(get_world_size())
+    if is_distributed():
+        num_batches = int(math.ceil(float(num_batches) / float(world_size)))
+        if int(max_steps) > 0:
+            max_steps = int(math.ceil(float(max_steps) / float(world_size)))
+
     use_pointwise_critic, pointwise_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
 
     critic_sampling_cfg = cfg.get("critic_sampling") or {}
@@ -138,6 +147,14 @@ def train_sa2c(
         pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
 
+    def _unwrap(m: torch.nn.Module) -> torch.nn.Module:
+        return m.module if hasattr(m, "module") else m
+
+    if is_distributed():
+        local_rank = int(get_local_rank())
+        qn1 = DDP(qn1, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        qn2 = DDP(qn2, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+
     pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
     use_pretrained_backbone = bool(isinstance(pretrained_backbone_cfg, dict) and pretrained_backbone_cfg.get("use", False))
     if use_pretrained_backbone:
@@ -145,17 +162,20 @@ def train_sa2c(
         ckpt_path = _resolve_pretrained_baseline_ckpt(run_dir=run_dir, pretrained_config_name=pretrained_config_name)
         if not ckpt_path.exists():
             raise FileNotFoundError(f"Missing pretrained backbone checkpoint: {ckpt_path}")
-        _load_pretrained_backbone_into_qnet(qnet=qn1, ckpt_path=ckpt_path, device=device)
-        _load_pretrained_backbone_into_qnet(qnet=qn2, ckpt_path=ckpt_path, device=device)
+        _load_pretrained_backbone_into_qnet(qnet=_unwrap(qn1), ckpt_path=ckpt_path, device=device)
+        _load_pretrained_backbone_into_qnet(qnet=_unwrap(qn2), ckpt_path=ckpt_path, device=device)
 
     if use_pretrained_backbone:
         backbone_lr_phase1 = pretrained_backbone_cfg.get("backbone_lr", None)
         backbone_lr_phase2 = pretrained_backbone_cfg.get("backbone_lr_2", None)
 
-        def _make_opt(qn: SASRecQNetworkRectools, *, critic_lr: float, backbone_lr) -> torch.optim.Optimizer:
-            groups: list[dict] = [{"params": list(qn.critic_parameters()), "lr": float(critic_lr)}]
+        def _make_opt(qn: torch.nn.Module, *, critic_lr: float, backbone_lr) -> torch.optim.Optimizer:
+            base = _unwrap(qn)
+            if not isinstance(base, SASRecQNetworkRectools):
+                raise TypeError("Expected SASRecQNetworkRectools module")
+            groups: list[dict] = [{"params": list(base.critic_parameters()), "lr": float(critic_lr)}]
             if backbone_lr is not None:
-                groups.append({"params": list(qn.backbone_parameters()), "lr": float(backbone_lr)})
+                groups.append({"params": list(base.backbone_parameters()), "lr": float(backbone_lr)})
             return torch.optim.Adam(groups)
 
         opt1_qn1 = _make_opt(qn1, critic_lr=float(cfg.get("lr", 0.005)), backbone_lr=backbone_lr_phase1)
@@ -215,8 +235,8 @@ def train_sa2c(
                 f"--continue requires {best_phase2_path.name} or {best_warmup_path.name} in run_dir={str(run_dir)}"
             )
         state = torch.load(str(ckpt_path), map_location=device)
-        qn1.load_state_dict(state)
-        qn2.load_state_dict(state)
+        _unwrap(qn1).load_state_dict(state)
+        _unwrap(qn2).load_state_dict(state)
         if resume_phase2:
             entered_finetune = True
             warmup_baseline_finalized = True
@@ -284,8 +304,8 @@ def train_sa2c(
             if use_pretrained_backbone:
                 desired_backbone_train = (backbone_lr_phase1 is not None) if in_warmup else (backbone_lr_phase2 is not None)
                 if backbone_train_enabled is None or desired_backbone_train != backbone_train_enabled:
-                    qn1.set_backbone_requires_grad(desired_backbone_train)
-                    qn2.set_backbone_requires_grad(desired_backbone_train)
+                    _unwrap(qn1).set_backbone_requires_grad(desired_backbone_train)
+                    _unwrap(qn2).set_backbone_requires_grad(desired_backbone_train)
                     backbone_train_enabled = desired_backbone_train
             if (not in_warmup) and (not entered_finetune):
                 entered_finetune = True
@@ -303,7 +323,8 @@ def train_sa2c(
             critic_n_neg = int(sampled_cfg.get("critic_n_negatives", 256))
             use_pointwise_branch = use_pointwise_critic
 
-            pointer = np.random.randint(0, 2)
+            pointer = int(np.random.randint(0, 2)) if is_rank0() else 0
+            pointer = int(broadcast_int(pointer, device=device))
             if pointer == 0:
                 main_qn, target_qn = qn1, qn2
                 opt1, opt2 = opt1_qn1, opt2_qn1
@@ -319,43 +340,38 @@ def train_sa2c(
             done_flat = done_mask[valid_mask].to(torch.float32)
 
             if use_sampled_loss or use_pointwise_branch:
-                seqs_main = main_qn.encode_seq(states_x)
-                with torch.no_grad():
-                    seqs_tgt = target_qn.encode_seq(states_x)
-
-                seqs_next_main = torch.zeros_like(seqs_main)
-                seqs_next_tgt = torch.zeros_like(seqs_tgt)
-                seqs_next_main[:, :-1, :] = seqs_main[:, 1:, :]
-                seqs_next_tgt[:, :-1, :] = seqs_tgt[:, 1:, :]
-
-                seqs_curr_flat = seqs_main[valid_mask]
-                seqs_curr_tgt_flat = seqs_tgt[valid_mask]
-                seqs_next_selector_flat = seqs_next_main[valid_mask]
-                seqs_next_target_flat = seqs_next_tgt[valid_mask]
-
-                if bool(cfg.get("debug", False)):
-                    if not torch.isfinite(seqs_curr_flat).all():
-                        raise FloatingPointError(f"Non-finite seq encodings at total_step={int(total_step)}")
-
                 critic_n_neg_eff = int(critic_n_neg) if use_sampled_loss else int(cfg.get("neg", 10))
                 if critic_use_pop_policy:
                     crit_negs = sample_negative_actions_by_mu(behavior_prob_table, action_flat, critic_n_neg_eff)
                 else:
                     crit_negs = sample_negative_actions(1, item_num + 1, action_flat, critic_n_neg_eff, device=device)
                 crit_cands = torch.cat([action_flat[:, None], crit_negs], dim=1)
-                q_curr_c = main_qn.score_q_candidates(seqs_curr_flat, crit_cands)
-                q_curr_tgt_c = target_qn.score_q_candidates(seqs_curr_tgt_flat, crit_cands)
-                q_next_selector_c = main_qn.score_q_candidates(seqs_next_selector_flat, crit_cands)
-                q_next_target_c = target_qn.score_q_candidates(seqs_next_target_flat, crit_cands)
-
+                ce_cands = None
                 if use_sampled_loss:
                     ce_negs = sample_negative_actions(1, item_num + 1, action_flat, ce_n_neg, device=device)
                     ce_cands = torch.cat([action_flat[:, None], ce_negs], dim=1)
-                    ce_logits_c = main_qn.score_ce_candidates(seqs_curr_flat, ce_cands)
-                else:
-                    ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
-                    ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
-                    ce_logits_c = ce_full_seq[valid_mask]
+
+                seqs_main, q_curr_c, q_next_selector_c, ce_logits_c, ce_next_logits_c = main_qn(
+                    states_x,
+                    valid_mask=valid_mask,
+                    crit_cands=crit_cands,
+                    ce_cands=ce_cands,
+                    return_full_ce=(not use_sampled_loss),
+                    ce_next_cands=(crit_cands if critic_use_pop_policy else None),
+                )
+                with torch.no_grad():
+                    _seqs_tgt, q_curr_tgt_c, q_next_target_c, _ce_tgt, _ce_next_tgt = target_qn(
+                        states_x,
+                        valid_mask=valid_mask,
+                        crit_cands=crit_cands,
+                    )
+
+                if ce_logits_c is None:
+                    raise RuntimeError("Expected ce_logits_c to be computed in candidate-scoring forward")
+                if bool(cfg.get("debug", False)):
+                    seqs_curr_flat = seqs_main[valid_mask]
+                    if not torch.isfinite(seqs_curr_flat).all():
+                        raise FloatingPointError(f"Non-finite seq encodings at total_step={int(total_step)}")
 
                 if bool(cfg.get("debug", False)):
                     if not torch.isfinite(q_curr_c).all():
@@ -366,8 +382,9 @@ def train_sa2c(
                 if reward_fn == "ndcg":
                     with torch.no_grad():
                         if use_sampled_loss:
-                            ce_full_seq = seqs_main @ main_qn.item_emb.weight.t()
-                            ce_full_seq[:, :, int(getattr(main_qn, "pad_id", 0))] = float("-inf")
+                            base = _unwrap(main_qn)
+                            ce_full_seq = seqs_main @ base.item_emb.weight.t()
+                            ce_full_seq[:, :, int(getattr(base, "pad_id", 0))] = float("-inf")
                             ce_flat_full = ce_full_seq[valid_mask]
                             reward_flat = ndcg_reward_from_logits(ce_flat_full.detach(), action_flat)
                         else:
@@ -376,7 +393,8 @@ def train_sa2c(
                     reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
 
                 if critic_use_pop_policy:
-                    ce_next_logits_c = main_qn.score_ce_candidates(seqs_next_selector_flat, crit_cands)
+                    if ce_next_logits_c is None:
+                        raise RuntimeError("Expected ce_next_logits_c to be computed in candidate-scoring forward")
                     mu_c = behavior_prob_table[crit_cands]
                     a_star_idx = sample_corrected_policy_index(ce_next_logits_c, mu_c, critic_mu_eps)
                     q_tp1 = q_next_target_c.gather(1, a_star_idx).squeeze(1)
@@ -526,10 +544,10 @@ def train_sa2c(
         metric_2 = float(get_metric_value(val_metrics_2, metric_key))
         if metric_2 > metric_1:
             metric = float(metric_2)
-            best_state_for_epoch = qn2.state_dict()
+            best_state_for_epoch = _unwrap(qn2).state_dict()
         else:
             metric = float(metric_1)
-            best_state_for_epoch = qn1.state_dict()
+            best_state_for_epoch = _unwrap(qn1).state_dict()
         if trial is not None:
             trial.report(float(metric), step=int(epoch_idx))
             if bool(getattr(trial, "should_prune", lambda: False)()):
@@ -538,8 +556,9 @@ def train_sa2c(
             if metric > best_metric_warmup:
                 best_metric_warmup = metric
                 epochs_since_improve_warmup = 0
-                torch.save(best_state_for_epoch, best_warmup_path)
-                logger.info("best_model_warmup.pt updated (val %s=%f)", str(metric_key), float(best_metric_warmup))
+                if is_rank0():
+                    torch.save(best_state_for_epoch, best_warmup_path)
+                    logger.info("best_model_warmup.pt updated (val %s=%f)", str(metric_key), float(best_metric_warmup))
             else:
                 epochs_since_improve_warmup += 1
                 logger.info(
@@ -555,8 +574,8 @@ def train_sa2c(
                 warmup_baseline_finalized = True
                 entered_finetune = True
                 if best_warmup_path.exists():
-                    qn1.load_state_dict(torch.load(best_warmup_path, map_location=device))
-                    qn2.load_state_dict(torch.load(best_warmup_path, map_location=device))
+                    _unwrap(qn1).load_state_dict(torch.load(best_warmup_path, map_location=device))
+                    _unwrap(qn2).load_state_dict(torch.load(best_warmup_path, map_location=device))
                 phase = "finetune"
                 best_metric_phase2 = float("-inf")
                 epochs_since_improve_phase2 = 0
@@ -577,8 +596,9 @@ def train_sa2c(
             if metric > best_metric_phase2:
                 best_metric_phase2 = metric
                 epochs_since_improve_phase2 = 0
-                torch.save(best_state_for_epoch, best_phase2_path)
-                logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_phase2))
+                if is_rank0():
+                    torch.save(best_state_for_epoch, best_phase2_path)
+                    logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_phase2))
             else:
                 epochs_since_improve_phase2 += 1
                 logger.info(
@@ -598,8 +618,9 @@ def train_sa2c(
             ) > 0.0:
                 if metric > best_metric_warmup:
                     best_metric_warmup = metric
-                    torch.save(best_state_for_epoch, best_warmup_path)
-                    logger.info("best_model_warmup.pt updated (val ndcg@10=%f)", float(best_metric_warmup))
+                    if is_rank0():
+                        torch.save(best_state_for_epoch, best_warmup_path)
+                        logger.info("best_model_warmup.pt updated (val ndcg@10=%f)", float(best_metric_warmup))
 
             if entered_finetune:
                 if (not warmup_baseline_finalized) and np.isfinite(metric):
@@ -617,8 +638,9 @@ def train_sa2c(
                     if metric > best_metric_phase2:
                         best_metric_phase2 = metric
                         epochs_since_improve_phase2 = 0
-                        torch.save(best_state_for_epoch, best_phase2_path)
-                        logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_phase2))
+                        if is_rank0():
+                            torch.save(best_state_for_epoch, best_phase2_path)
+                            logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_phase2))
                     else:
                         epochs_since_improve_phase2 += 1
                         logger.info(
@@ -645,11 +667,12 @@ def train_sa2c(
     elif legacy_warmup_path.exists():
         warmup_path = legacy_warmup_path
     if entered_finetune or best_phase2_path.exists():
-        if not best_phase2_path.exists():
-            torch.save(qn1.state_dict(), best_phase2_path)
+        if is_rank0() and (not best_phase2_path.exists()):
+            torch.save(_unwrap(qn1).state_dict(), best_phase2_path)
         return best_phase2_path, warmup_path
     if warmup_path is None:
-        torch.save(qn1.state_dict(), best_warmup_path)
+        if is_rank0():
+            torch.save(_unwrap(qn1).state_dict(), best_warmup_path)
         warmup_path = best_warmup_path
     return warmup_path, warmup_path
 

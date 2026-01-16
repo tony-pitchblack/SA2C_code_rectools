@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import RandomSampler
 
 from ..data_utils.albert4rec import make_albert4rec_loader
+from ..distributed import get_local_rank, get_world_size, is_distributed, is_rank0
 from ..metrics import evaluate_albert4rec_loo, get_metric_value
 from ..models.albert4rec import Albert4Rec
 from ..utils import tqdm
@@ -80,6 +83,11 @@ def train_albert4rec(
     metric_key: str = "overall.ndcg@10",
 ):
     logger = logging.getLogger(__name__)
+    world_size = int(get_world_size())
+    if is_distributed():
+        num_batches = int(math.ceil(float(num_batches) / float(world_size)))
+        if int(max_steps) > 0:
+            max_steps = int(math.ceil(float(max_steps) / float(world_size)))
     a4 = cfg.get("albert4rec") or {}
     if not isinstance(a4, dict):
         raise ValueError("albert4rec must be a mapping (dict)")
@@ -98,6 +106,9 @@ def train_albert4rec(
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
         intermediate_size=intermediate_size,
     ).to(device)
+    if is_distributed():
+        local_rank = int(get_local_rank())
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
     opt = torch.optim.Adam(model.parameters(), lr=float(cfg.get("lr", 1e-4)))
 
     total_step = 0
@@ -178,8 +189,10 @@ def train_albert4rec(
         if metric > best_metric:
             best_metric = metric
             epochs_since_improve = 0
-            torch.save(model.state_dict(), run_dir / "best_model.pt")
-            logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric))
+            if is_rank0():
+                base = model.module if hasattr(model, "module") else model
+                torch.save(base.state_dict(), run_dir / "best_model.pt")
+                logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric))
         else:
             epochs_since_improve += 1
             logger.info(
@@ -198,8 +211,9 @@ def train_albert4rec(
             break
 
     best_path = run_dir / "best_model.pt"
-    if not best_path.exists():
-        torch.save(model.state_dict(), best_path)
+    if is_rank0() and (not best_path.exists()):
+        base = model.module if hasattr(model, "module") else model
+        torch.save(base.state_dict(), best_path)
     return best_path
 
 

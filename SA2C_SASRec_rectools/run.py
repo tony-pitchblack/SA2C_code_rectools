@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.multiprocessing as mp
 
 from .artifacts import write_results
 from .cli import parse_args
@@ -16,6 +18,16 @@ from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_s
 from .data_utils.persrec_tc5 import prepare_persrec_tc5
 from .data_utils.albert4rec import make_albert4rec_loader
 from .data_utils.sessions import SessionDataset, make_session_loader
+from .distributed import (
+    barrier,
+    ddp_cleanup,
+    ddp_setup,
+    find_free_port,
+    is_distributed,
+    is_rank0,
+    parse_cuda_devices,
+    silence_logging_if_needed,
+)
 from .logging_utils import configure_logging, dump_config
 from .models import Albert4Rec, SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
@@ -37,13 +49,35 @@ def _infer_eval_scheme_from_config_path(config_path: str, *, dataset_name: str) 
     return None
 
 
-def main():
-    args = parse_args()
+def _select_device(*, cfg: dict, smoke_cpu: bool) -> torch.device:
+    if bool(smoke_cpu):
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        if is_distributed():
+            return torch.device(f"cuda:{int(torch.cuda.current_device())}")
+        dev = cfg.get("device_id", None)
+        if isinstance(dev, int):
+            return torch.device(f"cuda:{int(dev)}")
+        if isinstance(dev, str):
+            s = dev.strip()
+            if s.startswith("cuda"):
+                return torch.device(s)
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def _worker_main(
+    *,
+    cfg: dict,
+    args,
+    local_rank: int,
+    world_size: int,
+    device_ids: list[int] | None,
+) -> None:
+    silence_logging_if_needed(is_rank0=is_rank0())
     eval_only = bool(getattr(args, "eval_only", False))
     continue_training = bool(getattr(args, "continue_training", False))
     config_path = args.config
-    cfg = load_config(config_path)
-    cfg = apply_cli_overrides(cfg, args)
 
     model_type = str(cfg.get("model_type", "sasrec")).strip().lower()
     if model_type not in {"sasrec", "albert4rec"}:
@@ -102,8 +136,9 @@ def main():
                 raise ValueError(f"pretrained_backbone.{k} must be a float or null") from e
         cfg["pretrained_backbone"] = pretrained_backbone_cfg
 
-    configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
-    dump_config(cfg, run_dir)
+    if is_rank0():
+        configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
+        dump_config(cfg, run_dir)
 
     logger = logging.getLogger(__name__)
     logger.info("run_dir: %s", str(run_dir))
@@ -154,15 +189,17 @@ def main():
     max_steps = int(cfg.get("max_steps", 0))
 
     smoke_cpu = bool(getattr(args, "smoke_cpu", False))
+    if smoke_cpu and is_distributed():
+        raise ValueError("--smoke-cpu is not supported with DDP (WORLD_SIZE>1)")
     if smoke_cpu:
-        device = torch.device("cpu")
         num_epochs = 1
         train_batch_size = 8
         val_batch_size = 8
         train_num_workers = 0
         val_num_workers = 0
-    else:
-        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    device = _select_device(cfg=cfg, smoke_cpu=smoke_cpu)
+    if device.type == "cuda" and (not is_distributed()) and device.index is not None:
+        torch.cuda.set_device(int(device.index))
 
     if bool(cfg.get("debug", False)) and device.type == "cuda":
         torch.backends.cuda.enable_flash_sdp(False)
@@ -359,11 +396,16 @@ def main():
     test_dl_s = time.perf_counter() - t0
 
     gs_cfg = cfg.get("gridsearch") or {}
+    if is_distributed() and bool(gs_cfg.get("enable", False)):
+        raise ValueError("gridsearch.enable=true is not supported with DDP")
     if model_type == "albert4rec" and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch is not supported for albert4rec")
     if continue_training and bool(gs_cfg.get("enable", False)):
         raise ValueError("--continue is not supported with gridsearch.enable=true")
     if eval_only:
+        if is_distributed() and (not is_rank0()):
+            barrier()
+            return
         best_path = run_dir / "best_model.pt"
         if not best_path.exists():
             raise FileNotFoundError(f"Missing checkpoint: {best_path}")
@@ -486,6 +528,8 @@ def main():
             test_warmup=test_warmup,
             smoke_cpu=smoke_cpu,
         )
+        if is_distributed():
+            barrier()
         return
 
     if bool(gs_cfg.get("enable", False)):
@@ -617,6 +661,11 @@ def main():
 
     if model_type != "albert4rec":
         eval_fn_eff = eval_fn
+
+    if is_distributed() and (not is_rank0()):
+        barrier()
+        return
+
     val_best = eval_fn_eff(
         best_model,
         val_dl,
@@ -690,6 +739,69 @@ def main():
         val_warmup=val_warmup,
         test_warmup=test_warmup,
         smoke_cpu=smoke_cpu,
+    )
+    if is_distributed():
+        barrier()
+
+
+def _spawn_entry(
+    local_rank: int,
+    world_size: int,
+    device_ids: list[int],
+    cfg: dict,
+    args,
+) -> None:
+    silence_logging_if_needed(is_rank0=(int(local_rank) == 0))
+    os.environ["RANK"] = str(int(local_rank))
+    os.environ["LOCAL_RANK"] = str(int(local_rank))
+    os.environ["WORLD_SIZE"] = str(int(world_size))
+    device_idx = int(device_ids[int(local_rank)])
+    torch.cuda.set_device(int(device_idx))
+    ddp_setup(world_size=int(world_size))
+    try:
+        _worker_main(cfg=cfg, args=args, local_rank=int(local_rank), world_size=int(world_size), device_ids=device_ids)
+    finally:
+        ddp_cleanup()
+
+
+def main():
+    args = parse_args()
+    config_path = args.config
+    cfg = load_config(config_path)
+    cfg = apply_cli_overrides(cfg, args)
+
+    world_size_env = int(os.environ.get("WORLD_SIZE", "1") or "1")
+    if world_size_env > 1:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0") or "0")
+        silence_logging_if_needed(is_rank0=(int(local_rank) == 0))
+        if not torch.cuda.is_available():
+            raise RuntimeError("WORLD_SIZE>1 but CUDA is not available")
+        n_visible = int(torch.cuda.device_count())
+        if local_rank < 0 or local_rank >= n_visible:
+            raise RuntimeError(f"Invalid LOCAL_RANK={local_rank} for visible cuda device_count={n_visible}")
+        torch.cuda.set_device(int(local_rank))
+        ddp_setup(world_size=int(world_size_env))
+        try:
+            _worker_main(cfg=cfg, args=args, local_rank=int(local_rank), world_size=int(world_size_env), device_ids=None)
+        finally:
+            ddp_cleanup()
+        return
+
+    device_ids = parse_cuda_devices(cfg.get("device_id", None))
+    if len(device_ids) <= 1:
+        if len(device_ids) == 1 and torch.cuda.is_available():
+            torch.cuda.set_device(int(device_ids[0]))
+        _worker_main(cfg=cfg, args=args, local_rank=0, world_size=1, device_ids=device_ids if device_ids else None)
+        return
+
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", str(find_free_port()))
+    world_size = int(len(device_ids))
+    mp.spawn(
+        _spawn_entry,
+        args=(world_size, device_ids, cfg, args),
+        nprocs=world_size,
+        join=True,
     )
 
 
