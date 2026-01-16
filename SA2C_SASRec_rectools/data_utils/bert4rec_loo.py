@@ -202,14 +202,28 @@ def prepare_sessions_bert4rec_loo(
     seed: int,
     val_samples_num: int,
     test_samples_num: int,
+    limit_chunks_pct: float | None = None,
 ) -> tuple[Dataset, Dataset, Dataset]:
     dfs = [pd.read_pickle(str(Path(data_directory) / n)) for n in list(split_df_names)]
     df = pd.concat(dfs, axis=0, ignore_index=True)
     base_ds = SessionDatasetFromDF(df)
 
     items_list = base_ds.items_list
+    is_buy_list = base_ds.is_buy_list
+    splits_root = Path(data_directory)
+    if limit_chunks_pct is not None:
+        if not (0.0 < float(limit_chunks_pct) <= 1.0):
+            raise ValueError("limit_chunks_pct must be in (0, 1]")
+        total = int(len(items_list))
+        if total <= 0:
+            raise ValueError("No sessions found")
+        n_keep = max(1, min(total, int(math.ceil(float(total) * float(limit_chunks_pct)))))
+        splits_root = splits_root / f"limit_chunks={int(n_keep)}"
+        items_list = list(items_list[: int(n_keep)])
+        is_buy_list = list(is_buy_list[: int(n_keep)])
+
     eligible = np.asarray([i for i, x in enumerate(items_list) if int(x.numel()) >= 3], dtype=np.int64)
-    splits_path = Path(data_directory) / "bert4rec_eval" / "dataset_splits.npz"
+    splits_path = splits_root / "bert4rec_eval" / "dataset_splits.npz"
     train_idx, val_idx, test_idx = load_or_build_bert4rec_splits(
         n_rows=int(len(items_list)),
         eligible_idx=eligible,
@@ -229,7 +243,7 @@ def prepare_sessions_bert4rec_loo(
 
         def __getitem__(self, idx: int):
             items = items_list[int(idx)]
-            is_buy = base_ds.is_buy_list[int(idx)]
+            is_buy = is_buy_list[int(idx)]
             n_drop = 2 if bool(val_mask[int(idx)]) else 1
             if int(items.numel()) <= int(n_drop):
                 return torch.empty((0,), dtype=torch.long), torch.empty((0,), dtype=torch.long)
@@ -246,7 +260,7 @@ def prepare_sessions_bert4rec_loo(
         def __getitem__(self, i: int):
             idx = int(self.indices[int(i)])
             items = items_list[idx]
-            is_buy = base_ds.is_buy_list[idx]
+            is_buy = is_buy_list[idx]
             if int(self.drop_last) > 0:
                 items = items[: -int(self.drop_last)]
                 is_buy = is_buy[: -int(self.drop_last)]

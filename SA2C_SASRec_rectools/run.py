@@ -145,8 +145,8 @@ def main():
             raise ValueError("limit_chunks_pct must be a float in [0, 1]") from e
         if not (0.0 < float(limit_chunks_pct) <= 1.0):
             raise ValueError("limit_chunks_pct must be a float in (0, 1]")
-        if not persrec_tc5:
-            raise ValueError("limit_chunks_pct is supported only for persrec_tc5 dataset configs (for now)")
+        if (not persrec_tc5) and (not use_bert4rec_loo):
+            raise ValueError("limit_chunks_pct for sessions datasets requires bert4rec_loo.enable=true")
         if bool(sanity):
             raise ValueError("limit_chunks_pct cannot be used together with --sanity")
 
@@ -244,6 +244,7 @@ def main():
                 seed=int(cfg.get("seed", 0)),
                 val_samples_num=int(val_samples_num),
                 test_samples_num=int(test_samples_num),
+                limit_chunks_pct=limit_chunks_pct,
             )
             train_ds_s = 0.0
             val_ds_s = 0.0
