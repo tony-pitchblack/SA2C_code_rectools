@@ -27,7 +27,7 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 
 # DDP example (2 GPUs)
 CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_chunks-pct=0.1.yml
-CUDA_VISIBLE_DEV_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_approx_hparams_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_approx_hparams_chunks-pct=0.1.yml
 ```
 
 ## Plot test results (clicks + purchase ndcg@10)
