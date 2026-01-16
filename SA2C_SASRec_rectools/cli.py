@@ -5,6 +5,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train SA2C (Rectools) with per-position SASRec logits.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config.")
     parser.add_argument(
+        "--continue",
+        dest="continue_training",
+        action="store_true",
+        help="Continue SA2C training from run_dir checkpoints (best_model.pt => phase2, best_model_warmup.pt => phase1).",
+    )
+    parser.add_argument(
         "--eval-only",
         action="store_true",
         help="Skip training; evaluate existing best checkpoints in the corresponding run_dir and write results.",

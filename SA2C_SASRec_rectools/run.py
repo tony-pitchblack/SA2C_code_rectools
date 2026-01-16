@@ -40,6 +40,7 @@ def _infer_eval_scheme_from_config_path(config_path: str, *, dataset_name: str) 
 def main():
     args = parse_args()
     eval_only = bool(getattr(args, "eval_only", False))
+    continue_training = bool(getattr(args, "continue_training", False))
     config_path = args.config
     cfg = load_config(config_path)
     cfg = apply_cli_overrides(cfg, args)
@@ -319,6 +320,8 @@ def main():
     gs_cfg = cfg.get("gridsearch") or {}
     if model_type == "albert4rec" and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch is not supported for albert4rec")
+    if continue_training and bool(gs_cfg.get("enable", False)):
+        raise ValueError("--continue is not supported with gridsearch.enable=true")
     if eval_only:
         best_path = run_dir / "best_model.pt"
         if not best_path.exists():
@@ -393,7 +396,9 @@ def main():
         val_warmup = None
         test_warmup = None
         if enable_sa2c and model_type != "albert4rec":
-            warmup_path = run_dir / "best_warmup_model.pt"
+            warmup_path = run_dir / "best_model_warmup.pt"
+            if not warmup_path.exists():
+                warmup_path = run_dir / "best_warmup_model.pt"
             if warmup_path.exists():
                 warmup_model = SASRecQNetworkRectools(
                     item_num=item_num,
@@ -523,6 +528,7 @@ def main():
             max_steps=max_steps,
             reward_fn=reward_fn,
             evaluate_fn=eval_fn,
+            continue_training=continue_training,
         )
         best_model = SASRecQNetworkRectools(
             item_num=item_num,
