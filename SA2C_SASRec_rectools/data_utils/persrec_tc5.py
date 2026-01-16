@@ -105,12 +105,32 @@ def ensure_mapped_parquet_cache(
     mapped_parquet_dir = Path(mapped_parquet_dir)
     mapped_meta_path = Path(mapped_meta_path)
     if mapped_parquet_dir.exists() and any(mapped_parquet_dir.iterdir()) and mapped_meta_path.exists():
+        meta_ok = False
+        try:
+            z = np.load(str(mapped_meta_path))
+            meta_ok = "plu_idxs" in getattr(z, "files", [])
+        except Exception:
+            meta_ok = False
+        if meta_ok:
+            logger.info(
+                "persrec_tc5: using mapped parquet cache at %s (meta=%s)",
+                str(mapped_parquet_dir),
+                str(mapped_meta_path),
+            )
+            return
         logger.info(
-            "persrec_tc5: using mapped parquet cache at %s (meta=%s)",
+            "persrec_tc5: mapped parquet cache at %s is missing `plu_idxs` in meta=%s -> rebuilding",
             str(mapped_parquet_dir),
             str(mapped_meta_path),
         )
-        return
+        try:
+            shutil.rmtree(str(mapped_parquet_dir))
+        except Exception:
+            pass
+        try:
+            mapped_meta_path.unlink(missing_ok=True)
+        except Exception:
+            pass
     logger.info(
         "persrec_tc5: mapped parquet cache missing/incomplete at %s (meta=%s) -> building from %s (max_parts=%s)",
         str(mapped_parquet_dir),
@@ -133,6 +153,7 @@ def ensure_mapped_parquet_cache(
 
     item2id: dict[int, int] = {}
     counts_list: list[int] = []
+    raw_by_idx: list[int] = []
     t0 = time.perf_counter()
     for part_path in tqdm(source_files, desc="persrec_tc5 map parquet", unit="part", dynamic_ncols=True, leave=False):
         df_part = pd.read_parquet(str(part_path))
@@ -151,6 +172,7 @@ def ensure_mapped_parquet_cache(
                     idx = int(len(item2id))
                     item2id[raw] = idx
                     counts_list.append(0)
+                    raw_by_idx.append(int(raw))
                 out.append(int(idx))
                 counts_list[int(idx)] += 1
             mapped_seqs.append(out)
@@ -158,7 +180,8 @@ def ensure_mapped_parquet_cache(
         df_part[product_column] = mapped_seqs
         df_part.to_parquet(str(mapped_parquet_dir / part_path.name), index=False)
 
-    np.savez(str(mapped_meta_path), counts=np.asarray(counts_list, dtype=np.int64))
+    plu_idxs = np.asarray([i for i, raw in enumerate(raw_by_idx) if int(raw) >= 0], dtype=np.int64)
+    np.savez(str(mapped_meta_path), counts=np.asarray(counts_list, dtype=np.int64), plu_idxs=plu_idxs)
     logger.info(
         "persrec_tc5: mapped parquet built parts=%d items=%d in %.3fs (%s)",
         int(len(source_files)),
