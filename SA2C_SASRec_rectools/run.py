@@ -14,12 +14,14 @@ from .cli import parse_args
 from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config, validate_pointwise_critic_cfg
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
 from .data_utils.persrec_tc5 import prepare_persrec_tc5
+from .data_utils.albert4rec import make_albert4rec_loader
 from .data_utils.sessions import SessionDataset, make_session_loader
 from .logging_utils import configure_logging, dump_config
-from .models import SASRecBaselineRectools, SASRecQNetworkRectools
+from .models import Albert4Rec, SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
-from .metrics import evaluate, evaluate_loo
+from .metrics import evaluate, evaluate_albert4rec_loo, evaluate_loo
 from .gridsearch import run_optuna_gridsearch
+from .training.albert4rec import train_albert4rec
 from .training.baseline import train_baseline
 from .training.sa2c import train_sa2c
 
@@ -41,6 +43,10 @@ def main():
     config_path = args.config
     cfg = load_config(config_path)
     cfg = apply_cli_overrides(cfg, args)
+
+    model_type = str(cfg.get("model_type", "sasrec")).strip().lower()
+    if model_type not in {"sasrec", "albert4rec"}:
+        raise ValueError("model_type must be one of: sasrec | albert4rec")
 
     if str(cfg.get("early_stopping_metric", "ndcg@10")) != "ndcg@10":
         raise ValueError("Only early_stopping_metric='ndcg@10' is supported.")
@@ -119,6 +125,11 @@ def main():
         val_samples_num = min(int(val_samples_num), int(cap))
         test_samples_num = min(int(test_samples_num), int(cap))
     eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
+    if model_type == "albert4rec":
+        if not bool(use_bert4rec_loo):
+            raise ValueError("albert4rec is supported only with bert4rec_loo.enable=true (bert4rec_eval)")
+        if bool(enable_sa2c):
+            raise ValueError("albert4rec requires enable_sa2c=false")
 
     for k in ("limit_train_batches", "limit_val_batches", "limit_test_batches"):
         v = cfg.get(k, None)
@@ -257,14 +268,25 @@ def main():
         val_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_val.df")
         val_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    val_dl = make_session_loader(
-        val_ds,
-        batch_size=val_batch_size,
-        num_workers=val_num_workers,
-        pin_memory=pin_memory,
-        pad_item=item_num,
-        shuffle=False,
-    )
+    if model_type == "albert4rec":
+        val_dl = make_albert4rec_loader(
+            val_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            state_size=int(state_size),
+            purchase_only=bool(purchase_only),
+            shuffle=False,
+        )
+    else:
+        val_dl = make_session_loader(
+            val_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            pad_item=item_num,
+            shuffle=False,
+        )
     val_dl_s = time.perf_counter() - t0
 
     if (not persrec_tc5) and (not use_bert4rec_loo):
@@ -272,46 +294,77 @@ def main():
         test_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_test.df")
         test_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    test_dl = make_session_loader(
-        test_ds,
-        batch_size=val_batch_size,
-        num_workers=val_num_workers,
-        pin_memory=pin_memory,
-        pad_item=item_num,
-        shuffle=False,
-    )
+    if model_type == "albert4rec":
+        test_dl = make_albert4rec_loader(
+            test_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            state_size=int(state_size),
+            purchase_only=bool(purchase_only),
+            shuffle=False,
+        )
+    else:
+        test_dl = make_session_loader(
+            test_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            pad_item=item_num,
+            shuffle=False,
+        )
     test_dl_s = time.perf_counter() - t0
 
     gs_cfg = cfg.get("gridsearch") or {}
+    if model_type == "albert4rec" and bool(gs_cfg.get("enable", False)):
+        raise ValueError("gridsearch is not supported for albert4rec")
     if eval_only:
         best_path = run_dir / "best_model.pt"
         if not best_path.exists():
             raise FileNotFoundError(f"Missing checkpoint: {best_path}")
 
-        if enable_sa2c:
-            best_model = SASRecQNetworkRectools(
+        a4_cfg = cfg.get("albert4rec") or {}
+        intermediate_size = a4_cfg.get("intermediate_size", None) if isinstance(a4_cfg, dict) else None
+        if intermediate_size is not None:
+            intermediate_size = int(intermediate_size)
+
+        if model_type == "albert4rec":
+            best_model = Albert4Rec(
                 item_num=item_num,
                 state_size=state_size,
                 hidden_size=int(cfg.get("hidden_factor", 64)),
                 num_heads=int(cfg.get("num_heads", 1)),
-                num_blocks=int(cfg.get("num_blocks", 1)),
+                num_layers=int(cfg.get("num_blocks", 1)),
                 dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-                pointwise_critic_use=pointwise_critic_use,
-                pointwise_critic_arch=pointwise_critic_arch,
-                pointwise_critic_mlp=pointwise_mlp_cfg,
+                intermediate_size=intermediate_size,
             ).to(device)
+            eval_fn_eff = evaluate_albert4rec_loo
         else:
-            best_model = SASRecBaselineRectools(
-                item_num=item_num,
-                state_size=state_size,
-                hidden_size=int(cfg.get("hidden_factor", 64)),
-                num_heads=int(cfg.get("num_heads", 1)),
-                num_blocks=int(cfg.get("num_blocks", 1)),
-                dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-            ).to(device)
+            if enable_sa2c:
+                best_model = SASRecQNetworkRectools(
+                    item_num=item_num,
+                    state_size=state_size,
+                    hidden_size=int(cfg.get("hidden_factor", 64)),
+                    num_heads=int(cfg.get("num_heads", 1)),
+                    num_blocks=int(cfg.get("num_blocks", 1)),
+                    dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                    pointwise_critic_use=pointwise_critic_use,
+                    pointwise_critic_arch=pointwise_critic_arch,
+                    pointwise_critic_mlp=pointwise_mlp_cfg,
+                ).to(device)
+            else:
+                best_model = SASRecBaselineRectools(
+                    item_num=item_num,
+                    state_size=state_size,
+                    hidden_size=int(cfg.get("hidden_factor", 64)),
+                    num_heads=int(cfg.get("num_heads", 1)),
+                    num_blocks=int(cfg.get("num_blocks", 1)),
+                    dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                ).to(device)
+            eval_fn_eff = eval_fn
         best_model.load_state_dict(torch.load(best_path, map_location=device))
 
-        val_best = eval_fn(
+        val_best = eval_fn_eff(
             best_model,
             val_dl,
             reward_click,
@@ -323,7 +376,7 @@ def main():
             item_num=item_num,
             purchase_only=purchase_only,
         )
-        test_best = eval_fn(
+        test_best = eval_fn_eff(
             best_model,
             test_dl,
             reward_click,
@@ -338,7 +391,7 @@ def main():
 
         val_warmup = None
         test_warmup = None
-        if enable_sa2c:
+        if enable_sa2c and model_type != "albert4rec":
             warmup_path = run_dir / "best_warmup_model.pt"
             if warmup_path.exists():
                 warmup_model = SASRecQNetworkRectools(
@@ -412,7 +465,42 @@ def main():
         )
         return
 
-    if enable_sa2c:
+    if model_type == "albert4rec":
+        a4_cfg = cfg.get("albert4rec") or {}
+        intermediate_size = a4_cfg.get("intermediate_size", None) if isinstance(a4_cfg, dict) else None
+        if intermediate_size is not None:
+            intermediate_size = int(intermediate_size)
+        best_path = train_albert4rec(
+            cfg=cfg,
+            train_ds=train_ds,
+            val_dl=val_dl,
+            run_dir=run_dir,
+            device=device,
+            reward_click=reward_click,
+            reward_buy=reward_buy,
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+            num_epochs=num_epochs,
+            num_batches=num_batches,
+            train_batch_size=train_batch_size,
+            train_num_workers=train_num_workers,
+            pin_memory=pin_memory,
+            max_steps=max_steps,
+        )
+        warmup_path = None
+        best_model = Albert4Rec(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_layers=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            intermediate_size=intermediate_size,
+        ).to(device)
+        best_model.load_state_dict(torch.load(best_path, map_location=device))
+        eval_fn_eff = evaluate_albert4rec_loo
+    elif enable_sa2c:
         best_path, warmup_path = train_sa2c(
             cfg=cfg,
             train_ds=train_ds,
@@ -477,8 +565,11 @@ def main():
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
+        eval_fn_eff = eval_fn
 
-    val_best = eval_fn(
+    if model_type != "albert4rec":
+        eval_fn_eff = eval_fn
+    val_best = eval_fn_eff(
         best_model,
         val_dl,
         reward_click,
@@ -490,7 +581,7 @@ def main():
         item_num=item_num,
         purchase_only=purchase_only,
     )
-    test_best = eval_fn(
+    test_best = eval_fn_eff(
         best_model,
         test_dl,
         reward_click,
@@ -505,7 +596,7 @@ def main():
 
     val_warmup = None
     test_warmup = None
-    if warmup_path is not None and Path(warmup_path).exists():
+    if warmup_path is not None and Path(warmup_path).exists() and model_type != "albert4rec":
         warmup_model = SASRecQNetworkRectools(
             item_num=item_num,
             state_size=state_size,

@@ -5,6 +5,7 @@ import yaml
 
 def default_config() -> dict:
     return {
+        "model_type": "sasrec",
         "gridsearch": {
             "enable": False,
             "metric": "overall.ndcg@10",
@@ -69,6 +70,11 @@ def default_config() -> dict:
             "enable": False,
             "val_samples_num": 0,
             "test_samples_num": 0,
+        },
+        "albert4rec": {
+            "masking_proba": 0.2,
+            "n_negatives": 256,
+            "intermediate_size": None,
         },
         "weight": 1.0,
         "smooth": 0.0,

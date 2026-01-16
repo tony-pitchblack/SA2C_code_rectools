@@ -324,6 +324,135 @@ def evaluate_loo(
     }
 
 
+@torch.no_grad()
+def evaluate_albert4rec_loo(
+    model,
+    session_loader,
+    reward_click,
+    reward_buy,
+    device,
+    *,
+    split: str = "val",
+    state_size: int,
+    item_num: int,
+    purchase_only: bool = False,
+    debug: bool = False,
+    epoch=None,
+    num_epochs=None,
+):
+    _ = purchase_only
+    total_clicks = 0.0
+    total_purchase = 0.0
+    topk = [5, 10, 15, 20]
+
+    total_reward = [0.0, 0.0, 0.0, 0.0]
+    hit_clicks = [0.0, 0.0, 0.0, 0.0]
+    ndcg_clicks = [0.0, 0.0, 0.0, 0.0]
+    hit_purchase = [0.0, 0.0, 0.0, 0.0]
+    ndcg_purchase = [0.0, 0.0, 0.0, 0.0]
+
+    mask_id = int(item_num) + 1
+    model.eval()
+    for input_ids, is_buy in tqdm(
+        session_loader,
+        desc=str(split),
+        unit="batch",
+        dynamic_ncols=True,
+        leave=False,
+    ):
+        input_ids = input_ids.to(device, non_blocking=True).to(torch.long)
+        is_buy = is_buy.to(device, non_blocking=True).to(torch.long)
+        if int(input_ids.shape[1]) != int(state_size):
+            raise ValueError(f"Expected input_ids shape [B,{int(state_size)}], got {tuple(input_ids.shape)}")
+
+        nonpad = input_ids.ne(0)
+        lengths = nonpad.sum(dim=1).to(torch.long)
+        keep = lengths.gt(0)
+        if not bool(keep.any()):
+            continue
+        if not bool(keep.all()):
+            input_ids = input_ids[keep]
+            is_buy = is_buy[keep]
+            lengths = lengths[keep]
+
+        bsz = int(input_ids.shape[0])
+        last_idx = (lengths - 1).clamp(min=0).to(torch.long)
+        rows = torch.arange(bsz, device=device)
+        true_items = input_ids[rows, last_idx]
+        is_buy_t = is_buy[rows, last_idx]
+        reward_t = torch.where(is_buy_t == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+
+        masked = input_ids.clone()
+        masked[rows, last_idx] = int(mask_id)
+        h = model(masked)
+        if debug and (not torch.isfinite(h).all()):
+            raise FloatingPointError("Non-finite hidden states during evaluation")
+        h_last = h[rows, last_idx]
+        ce_logits = model.full_item_scores(h_last)
+
+        kmax = int(max(topk))
+        vals, idx = torch.topk(ce_logits, k=kmax, dim=1, largest=True, sorted=False)
+        order = vals.argsort(dim=1)
+        idx_sorted = idx.gather(1, order)
+        sorted_list = idx_sorted.detach().cpu().numpy()
+
+        actions_np = true_items.detach().cpu().numpy()
+        rewards_np = reward_t.detach().cpu().numpy()
+        total_clicks += float((rewards_np == reward_click).sum())
+        total_purchase += float((rewards_np != reward_click).sum())
+        calculate_hit(
+            sorted_list,
+            topk,
+            actions_np,
+            rewards_np,
+            reward_click,
+            total_reward,
+            hit_clicks,
+            ndcg_clicks,
+            hit_purchase,
+            ndcg_purchase,
+        )
+
+    click = {}
+    purchase = {}
+    overall = {}
+    denom_all = float(total_clicks + total_purchase)
+    for i, k in enumerate(topk):
+        hr_click = hit_clicks[i] / total_clicks if total_clicks > 0 else 0.0
+        hr_purchase = hit_purchase[i] / total_purchase if total_purchase > 0 else 0.0
+        ng_click = ndcg_clicks[i] / total_clicks if total_clicks > 0 else 0.0
+        ng_purchase = ndcg_purchase[i] / total_purchase if total_purchase > 0 else 0.0
+        click[f"hr@{k}"] = float(hr_click)
+        click[f"ndcg@{k}"] = float(ng_click)
+        purchase[f"hr@{k}"] = float(hr_purchase)
+        purchase[f"ndcg@{k}"] = float(ng_purchase)
+        overall[f"ndcg@{k}"] = float((ndcg_clicks[i] + ndcg_purchase[i]) / denom_all) if denom_all > 0 else 0.0
+
+    logger = logging.getLogger(__name__)
+    if epoch is not None and num_epochs is not None:
+        prefix = f"epoch {int(epoch)}/{int(num_epochs)} "
+    elif epoch is not None:
+        prefix = f"epoch {int(epoch)} "
+    else:
+        prefix = ""
+    logger.info("#############################################################")
+    logger.info("%s%s metrics", prefix, str(split))
+    logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
+    for k in topk:
+        logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        logger.info("clicks hr ndcg @ %d: %f, %f", k, float(click[f"hr@{k}"]), float(click[f"ndcg@{k}"]))
+        logger.info("purchase hr ndcg @ %d: %f, %f", k, float(purchase[f"hr@{k}"]), float(purchase[f"ndcg@{k}"]))
+    logger.info("#############################################################")
+    logger.info("")
+
+    return {
+        "topk": topk,
+        "click": click,
+        "purchase": purchase,
+        "overall": overall,
+    }
+
+
 def metrics_row(metrics: dict, kind: str):
     topk = metrics["topk"]
     src = metrics[kind]
@@ -359,6 +488,7 @@ def summary_at_k_text(val_metrics: dict, test_metrics: dict, k: int):
 __all__ = [
     "evaluate",
     "evaluate_loo",
+    "evaluate_albert4rec_loo",
     "calculate_hit",
     "ndcg_reward_from_logits",
     "get_metric_value",
