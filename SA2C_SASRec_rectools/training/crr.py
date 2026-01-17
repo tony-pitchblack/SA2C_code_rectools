@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import RandomSampler
 
-from ..config import validate_pointwise_critic_cfg
+from ..config import validate_crr_actor_cfg, validate_crr_critic_cfg
 from ..distributed import get_local_rank, get_world_size, is_distributed, is_rank0
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
 from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
@@ -77,9 +77,9 @@ def train_crr(
     actor_lr = float(crr_cfg.get("actor_lr", cfg.get("lr", 0.005)))
     critic_lr = float(crr_cfg.get("critic_lr", cfg.get("lr", 0.005)))
 
-    pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
-    if advantage_baseline == "mean" and bool(pointwise_critic_use) and str(pointwise_critic_arch) != "dot":
-        raise ValueError("crr.advantage_baseline=mean requires pointwise_critic.arch=dot when pointwise_critic.use=true")
+    actor_lstm_cfg, actor_mlp_cfg = validate_crr_actor_cfg(cfg)
+    critic_type, critic_lstm_cfg, critic_mlp_cfg = validate_crr_critic_cfg(cfg)
+    use_pointwise = str(critic_type) == "pointwise"
 
     online = SASRecQNetworkRectools(
         item_num=item_num,
@@ -88,9 +88,13 @@ def train_crr(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-        pointwise_critic_use=bool(pointwise_critic_use),
-        pointwise_critic_arch=str(pointwise_critic_arch),
-        pointwise_critic_mlp=pointwise_mlp_cfg,
+        pointwise_critic_use=bool(use_pointwise),
+        pointwise_critic_arch="dot",
+        pointwise_critic_mlp=None,
+        actor_lstm=actor_lstm_cfg,
+        actor_mlp=actor_mlp_cfg,
+        critic_lstm=critic_lstm_cfg,
+        critic_mlp=critic_mlp_cfg,
     ).to(device)
     target = SASRecQNetworkRectools(
         item_num=item_num,
@@ -99,9 +103,13 @@ def train_crr(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-        pointwise_critic_use=bool(pointwise_critic_use),
-        pointwise_critic_arch=str(pointwise_critic_arch),
-        pointwise_critic_mlp=pointwise_mlp_cfg,
+        pointwise_critic_use=bool(use_pointwise),
+        pointwise_critic_arch="dot",
+        pointwise_critic_mlp=None,
+        actor_lstm=actor_lstm_cfg,
+        actor_mlp=actor_mlp_cfg,
+        critic_lstm=critic_lstm_cfg,
+        critic_mlp=critic_mlp_cfg,
     ).to(device)
 
     if is_distributed():
@@ -117,7 +125,7 @@ def train_crr(
         p.requires_grad_(False)
 
     base = _unwrap(online)
-    actor_opt = torch.optim.Adam(list(base.backbone_parameters()), lr=float(actor_lr))
+    actor_opt = torch.optim.Adam(list(base.actor_parameters()), lr=float(actor_lr))
     critic_opt = torch.optim.Adam(list(base.critic_parameters()), lr=float(critic_lr))
 
     total_step = 0
@@ -149,13 +157,6 @@ def train_crr(
         pad_id = int(getattr(base, "pad_id", 0))
         vocab = int(item_num) + 1
         use_pointwise = bool(getattr(base, "pointwise_critic_use", False))
-        use_mlp_critic = False
-        mlp = None
-        if use_pointwise:
-            use_mlp_critic = str(getattr(base, "pointwise_critic_arch", "dot")) == "mlp"
-            mlp = getattr(base, "pointwise_critic_mlp", None)
-            if use_mlp_critic and mlp is None:
-                raise RuntimeError("pointwise_critic_mlp is not initialized")
 
         for _, batch in enumerate(
             tqdm(
@@ -196,19 +197,28 @@ def train_crr(
             is_buy_flat = is_buy[valid_mask]
             done_flat = done_mask[valid_mask].to(torch.float32)
 
-            seqs = base.encode_seq(states_x)
             with torch.no_grad():
-                seqs_tgt = tgt.encode_seq(states_x)
-            seqs_next = torch.zeros_like(seqs)
-            seqs_next[:, :-1, :] = seqs[:, 1:, :]
-            seqs_curr_flat = seqs[valid_mask]
-            seqs_next_flat = seqs_next[valid_mask]
-            seqs_next_tgt = torch.zeros_like(seqs_tgt)
-            seqs_next_tgt[:, :-1, :] = seqs_tgt[:, 1:, :]
-            seqs_next_tgt_flat = seqs_next_tgt[valid_mask]
+                critic_seqs_tgt = tgt.critic_seq(states_x)
 
-            logits_curr = seqs_curr_flat @ base.item_emb.weight.t()
-            logits_next = seqs_next_flat @ base.item_emb.weight.t()
+            actor_seqs = base.actor_seq(states_x)
+            critic_seqs = base.critic_seq(states_x)
+
+            actor_seqs_next = torch.zeros_like(actor_seqs)
+            actor_seqs_next[:, :-1, :] = actor_seqs[:, 1:, :]
+            actor_seqs_curr_flat = actor_seqs[valid_mask]
+            actor_seqs_next_flat = actor_seqs_next[valid_mask]
+
+            critic_seqs_next = torch.zeros_like(critic_seqs)
+            critic_seqs_next[:, :-1, :] = critic_seqs[:, 1:, :]
+            critic_seqs_curr_flat = critic_seqs[valid_mask]
+            critic_seqs_next_flat = critic_seqs_next[valid_mask]
+
+            critic_seqs_next_tgt = torch.zeros_like(critic_seqs_tgt)
+            critic_seqs_next_tgt[:, :-1, :] = critic_seqs_tgt[:, 1:, :]
+            critic_seqs_next_tgt_flat = critic_seqs_next_tgt[valid_mask]
+
+            logits_curr = actor_seqs_curr_flat @ base.item_emb.weight.t()
+            logits_next = actor_seqs_next_flat @ base.item_emb.weight.t()
             if pad_id >= 0 and pad_id < vocab:
                 logits_curr[:, pad_id] = float("-inf")
                 logits_next[:, pad_id] = float("-inf")
@@ -221,26 +231,24 @@ def train_crr(
 
             a_star = logits_next.argmax(dim=1)
             if use_pointwise:
+                if int(critic_seqs_curr_flat.shape[-1]) != int(base.hidden_size):
+                    raise ValueError("pointwise critic requires critic hidden_size == hidden_size")
                 with torch.no_grad():
-                    q_tp1 = tgt.q_value(seqs_next_tgt_flat, a_star)
+                    q_tp1 = tgt.q_value(critic_seqs_next_tgt_flat, a_star)
                     y = reward_flat + float(gamma) * (1.0 - done_flat) * q_tp1
 
-                seqs_curr_det = seqs_curr_flat.detach()
-                if use_mlp_critic:
-                    emb_det = base.item_emb(action_flat).detach()
-                    q_sa = mlp(torch.cat([seqs_curr_det, emb_det], dim=-1)).squeeze(-1)
-                else:
-                    emb_det = base.item_emb(action_flat).detach()
-                    q_sa = (seqs_curr_det * emb_det).sum(dim=-1) + base.head_q.bias[action_flat]
+                seqs_curr_det = critic_seqs_curr_flat.detach()
+                emb_det = base.item_emb(action_flat).detach()
+                q_sa = (seqs_curr_det * emb_det).sum(dim=-1) + base.head_q.bias[action_flat]
                 critic_loss = F.mse_loss(q_sa, y, reduction="mean")
             else:
-                seqs_curr_det = seqs_curr_flat.detach()
+                seqs_curr_det = critic_seqs_curr_flat.detach()
                 q_curr_full = base.head_q(seqs_curr_det)
                 if pad_id >= 0 and pad_id < vocab:
                     q_curr_full[:, pad_id] = float("-inf")
                 q_sa = q_curr_full.gather(1, action_flat[:, None]).squeeze(1)
                 with torch.no_grad():
-                    q_next_tgt_full = tgt.head_q(seqs_next_tgt_flat)
+                    q_next_tgt_full = tgt.head_q(critic_seqs_next_tgt_flat)
                     if pad_id >= 0 and pad_id < vocab:
                         q_next_tgt_full[:, pad_id] = float("-inf")
                     q_tp1 = q_next_tgt_full.gather(1, a_star[:, None]).squeeze(1)
@@ -254,13 +262,13 @@ def train_crr(
                 elif advantage_baseline == "max":
                     a_greedy = logits_curr.argmax(dim=1)
                     if use_pointwise:
-                        baseline = base.q_value(seqs_curr_flat, a_greedy).detach()
+                        baseline = base.q_value(critic_seqs_curr_flat, a_greedy).detach()
                     else:
                         baseline = q_curr_full.gather(1, a_greedy[:, None]).squeeze(1).detach()
                 else:
                     pi = F.softmax(logits_curr, dim=1)
                     if use_pointwise:
-                        q_full = logits_curr + base.head_q.bias[None, :]
+                        q_full = critic_seqs_curr_flat @ base.item_emb.weight.t() + base.head_q.bias[None, :]
                         if pad_id >= 0 and pad_id < vocab:
                             q_full[:, pad_id] = 0.0
                         baseline = (pi * q_full).sum(dim=1).detach()

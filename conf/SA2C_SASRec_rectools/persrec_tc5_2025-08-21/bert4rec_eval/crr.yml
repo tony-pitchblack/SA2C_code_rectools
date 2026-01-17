@@ -41,8 +41,16 @@ debug: false
 early_stopping_ep: 10
 early_stopping_metric: ndcg@10
 
-pointwise_critic:
-  use: false
+actor:
+  mlp:
+    hidden_sizes: [256]
+    dropout_rate: 0.0
+
+critic:
+  type: full-vocab
+  mlp:
+    hidden_sizes: [256]
+    dropout_rate: 0.0
 
 crr:
   temperature: 1.0

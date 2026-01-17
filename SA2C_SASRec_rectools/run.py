@@ -20,6 +20,8 @@ from .config import (
     resolve_ce_sampling,
     resolve_num_val_negative_samples,
     resolve_trainer,
+    validate_crr_actor_cfg,
+    validate_crr_critic_cfg,
     validate_pointwise_critic_cfg,
 )
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
@@ -99,7 +101,21 @@ def _worker_main(
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
     trainer = resolve_trainer(cfg)
     enable_sa2c = trainer in {"sa2c", "crr"}
-    pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
+    pointwise_critic_use = False
+    pointwise_critic_arch = "dot"
+    pointwise_mlp_cfg = None
+    actor_lstm_cfg = None
+    actor_mlp_cfg = None
+    critic_lstm_cfg = None
+    critic_mlp_cfg = None
+    if trainer == "crr":
+        actor_lstm_cfg, actor_mlp_cfg = validate_crr_actor_cfg(cfg)
+        critic_type, critic_lstm_cfg, critic_mlp_cfg = validate_crr_critic_cfg(cfg)
+        pointwise_critic_use = str(critic_type) == "pointwise"
+        pointwise_critic_arch = "dot"
+        pointwise_mlp_cfg = None
+    elif trainer == "sa2c":
+        pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
 
     repo_root = Path(__file__).resolve().parent.parent
     dataset_cfg = cfg.get("dataset", "retailrocket")
@@ -447,6 +463,10 @@ def _worker_main(
                     pointwise_critic_use=pointwise_critic_use,
                     pointwise_critic_arch=pointwise_critic_arch,
                     pointwise_critic_mlp=pointwise_mlp_cfg,
+                    actor_lstm=actor_lstm_cfg,
+                    actor_mlp=actor_mlp_cfg,
+                    critic_lstm=critic_lstm_cfg,
+                    critic_mlp=critic_mlp_cfg,
                 ).to(device)
             else:
                 best_model = SASRecBaselineRectools(
@@ -508,6 +528,10 @@ def _worker_main(
                     pointwise_critic_use=pointwise_critic_use,
                     pointwise_critic_arch=pointwise_critic_arch,
                     pointwise_critic_mlp=pointwise_mlp_cfg,
+                    actor_lstm=actor_lstm_cfg,
+                    actor_mlp=actor_mlp_cfg,
+                    critic_lstm=critic_lstm_cfg,
+                    critic_mlp=critic_mlp_cfg,
                 ).to(device)
                 warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
                 val_warmup = eval_fn(
@@ -644,6 +668,10 @@ def _worker_main(
             pointwise_critic_use=pointwise_critic_use,
             pointwise_critic_arch=pointwise_critic_arch,
             pointwise_critic_mlp=pointwise_mlp_cfg,
+            actor_lstm=actor_lstm_cfg,
+            actor_mlp=actor_mlp_cfg,
+            critic_lstm=critic_lstm_cfg,
+            critic_mlp=critic_mlp_cfg,
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
     elif trainer == "sa2c":
@@ -771,6 +799,10 @@ def _worker_main(
             pointwise_critic_use=pointwise_critic_use,
             pointwise_critic_arch=pointwise_critic_arch,
             pointwise_critic_mlp=pointwise_mlp_cfg,
+            actor_lstm=actor_lstm_cfg,
+            actor_mlp=actor_mlp_cfg,
+            critic_lstm=critic_lstm_cfg,
+            critic_mlp=critic_mlp_cfg,
         ).to(device)
         warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
 
