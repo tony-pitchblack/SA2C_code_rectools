@@ -126,7 +126,7 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 
 ```bash
 source .venv/bin/activate
-python scripts/plu_distribution.py --local-working-prefix data/persrec_tc5_2025-08-21
+python scripts/plu_distribution.py --local-working-prefix /raid/data_share/antonchernov/bert4recv1/data/tc5/
 ```
 
 ```bash
