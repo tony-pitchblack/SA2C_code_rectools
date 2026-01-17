@@ -91,6 +91,12 @@ def _read_test_ndcg_at_10(csv_path: Path) -> float | None:
         return None
 
 
+def _is_purchase_only_config_label(config_label: str) -> bool:
+    s = str(config_label).strip().lower()
+    s = s.replace("-", "_").replace(" ", "_")
+    return "purchase_only" in s
+
+
 def _plot_group(
     *,
     title: str,
@@ -300,13 +306,15 @@ def _build_plots(
                 cfg_map[str(source)] = (float(clicks), float(purchase), float(mtime))
 
     for group_key, cfg_map in tqdm(list(by_group.items()), desc="plot", unit="dataset"):
-        rows: list[tuple[str, float, float, str]] = []
+        rows_normal: list[tuple[str, float, float, str]] = []
+        rows_purchase_only: list[tuple[str, float, float, str]] = []
         for cfg in sorted(cfg_map.keys()):
+            rows_dst = rows_purchase_only if _is_purchase_only_config_label(cfg) else rows_normal
             for src in ("torch", "rectools"):
                 v = cfg_map.get(cfg, {}).get(src)
                 if v is None:
                     continue
-                rows.append((str(cfg), float(v[0]), float(v[1]), str(src)))
+                rows_dst.append((str(cfg), float(v[0]), float(v[1]), str(src)))
 
         results_root = logs_root.parent / "results"
         plots_root = results_root / "plots"
@@ -318,13 +326,26 @@ def _build_plots(
             out_dir = plots_root / group_key.dataset_name / group_key.eval_scheme
             title = f"{pretty_ds} / {group_key.eval_scheme}"
 
-        _plot_group(
-            title=title,
-            dataset_name=group_key.dataset_name,
-            rows=rows,
-            out_path=out_dir / "test_results.png",
-            max_metric_value=_max_metric_for_dataset(group_key.dataset_name, max_metric_values),
-        )
+        vmax = _max_metric_for_dataset(group_key.dataset_name, max_metric_values)
+        if rows_normal:
+            _plot_group(
+                title=title,
+                dataset_name=group_key.dataset_name,
+                rows=rows_normal,
+                out_path=out_dir / "test_results.png",
+                max_metric_value=vmax,
+            )
+        if rows_purchase_only:
+            po_title = f"{pretty_ds} (purchase only)"
+            if group_key.eval_scheme is not None:
+                po_title = f"{po_title} / {group_key.eval_scheme}"
+            _plot_group(
+                title=po_title,
+                dataset_name=group_key.dataset_name,
+                rows=rows_purchase_only,
+                out_path=out_dir / "test_results_purchase_only.png",
+                max_metric_value=vmax,
+            )
 
 
 def main() -> None:
