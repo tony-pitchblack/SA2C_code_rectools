@@ -62,7 +62,7 @@ def _compare_splits(root: Path) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--root", required=True, help="Path like ~/data/persrec_tc5_2025-08-21[/limit_chunks=<n>]")
+    p.add_argument("--root", required=True, help="Path like ./data/persrec_tc5_2025-08-21[/limit_chunks=<n>]")
     args = p.parse_args()
     root = Path(str(args.root)).expanduser().resolve()
     print(f"root={root}")

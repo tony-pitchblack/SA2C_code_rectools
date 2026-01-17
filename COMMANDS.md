@@ -148,12 +148,12 @@ python scripts/plu_distribution.py --local-working-prefix /raid/data_share/anton
 
 ```bash
 source .venv/bin/activate
-python scripts/plu_distribution.py --local-working-prefix ~/data/persrec_tc5_2025-08-21
+python scripts/plu_distribution.py --local-working-prefix ./data/persrec_tc5_2025-08-21
 ```
 
 ```bash
 source .venv/bin/activate
-python scripts/plu_debug.py --root ~/data/persrec_tc5_2025-08-21
+python scripts/plu_debug.py --root  ./data/persrec_tc5_2025-08-21/limit_chunks\=20/
 ```
 
 ```bash
