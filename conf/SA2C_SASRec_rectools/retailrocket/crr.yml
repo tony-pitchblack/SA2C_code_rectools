@@ -32,14 +32,14 @@ early_stopping_metric: ndcg@10
 
 actor:
   mlp:
-    hidden_sizes: [256]
-    dropout_rate: 0.0
+    hidden_sizes: [128]
+    dropout_rate: 0.5
 
 critic:
   type: full-vocab
   mlp:
-    hidden_sizes: [256]
-    dropout_rate: 0.0
+    hidden_sizes: [128]
+    dropout_rate: 0.5
 
 crr:
   temperature: 1.0
