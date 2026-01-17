@@ -34,7 +34,7 @@ def default_config() -> dict:
         "crr": {
             "temperature": 1.0,
             "weight_type": "exp",
-            "advantage_baseline": "max",
+            "advantage_baseline": "mean",
             "tau": 0.005,
             "critic_loss_weight": 1.0,
             "actor_lr": None,

@@ -31,16 +31,12 @@ early_stopping_ep: 10
 early_stopping_metric: ndcg@10
 
 pointwise_critic:
-  use: true
-  arch: mlp
-  mlp:
-    hidden_sizes: [64]
-    dropout_rate: 0.0
+  use: false
 
 crr:
   temperature: 1.0
   weight_type: exp
-  advantage_baseline: max
+  advantage_baseline: mean
   tau: 0.005
   critic_loss_weight: 1.0
   gamma: 0.5

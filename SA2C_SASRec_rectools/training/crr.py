@@ -78,10 +78,8 @@ def train_crr(
     critic_lr = float(crr_cfg.get("critic_lr", cfg.get("lr", 0.005)))
 
     pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
-    if not bool(pointwise_critic_use):
-        raise ValueError("CRR requires pointwise_critic.use=true")
-    if advantage_baseline == "mean" and str(pointwise_critic_arch) != "dot":
-        raise ValueError("crr.advantage_baseline=mean requires pointwise_critic.arch=dot")
+    if advantage_baseline == "mean" and bool(pointwise_critic_use) and str(pointwise_critic_arch) != "dot":
+        raise ValueError("crr.advantage_baseline=mean requires pointwise_critic.arch=dot when pointwise_critic.use=true")
 
     online = SASRecQNetworkRectools(
         item_num=item_num,
@@ -90,7 +88,7 @@ def train_crr(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-        pointwise_critic_use=True,
+        pointwise_critic_use=bool(pointwise_critic_use),
         pointwise_critic_arch=str(pointwise_critic_arch),
         pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
@@ -101,7 +99,7 @@ def train_crr(
         num_heads=int(cfg.get("num_heads", 1)),
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-        pointwise_critic_use=True,
+        pointwise_critic_use=bool(pointwise_critic_use),
         pointwise_critic_arch=str(pointwise_critic_arch),
         pointwise_critic_mlp=pointwise_mlp_cfg,
     ).to(device)
@@ -150,10 +148,14 @@ def train_crr(
         tgt = target
         pad_id = int(getattr(base, "pad_id", 0))
         vocab = int(item_num) + 1
-        use_mlp_critic = str(getattr(base, "pointwise_critic_arch", "dot")) == "mlp"
-        mlp = getattr(base, "pointwise_critic_mlp", None)
-        if use_mlp_critic and mlp is None:
-            raise RuntimeError("pointwise_critic_mlp is not initialized")
+        use_pointwise = bool(getattr(base, "pointwise_critic_use", False))
+        use_mlp_critic = False
+        mlp = None
+        if use_pointwise:
+            use_mlp_critic = str(getattr(base, "pointwise_critic_arch", "dot")) == "mlp"
+            mlp = getattr(base, "pointwise_critic_mlp", None)
+            if use_mlp_critic and mlp is None:
+                raise RuntimeError("pointwise_critic_mlp is not initialized")
 
         for _, batch in enumerate(
             tqdm(
@@ -195,10 +197,15 @@ def train_crr(
             done_flat = done_mask[valid_mask].to(torch.float32)
 
             seqs = base.encode_seq(states_x)
+            with torch.no_grad():
+                seqs_tgt = tgt.encode_seq(states_x)
             seqs_next = torch.zeros_like(seqs)
             seqs_next[:, :-1, :] = seqs[:, 1:, :]
             seqs_curr_flat = seqs[valid_mask]
             seqs_next_flat = seqs_next[valid_mask]
+            seqs_next_tgt = torch.zeros_like(seqs_tgt)
+            seqs_next_tgt[:, :-1, :] = seqs_tgt[:, 1:, :]
+            seqs_next_tgt_flat = seqs_next_tgt[valid_mask]
 
             logits_curr = seqs_curr_flat @ base.item_emb.weight.t()
             logits_next = seqs_next_flat @ base.item_emb.weight.t()
@@ -213,18 +220,32 @@ def train_crr(
                 reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
 
             a_star = logits_next.argmax(dim=1)
-            with torch.no_grad():
-                q_tp1 = tgt.q_value(seqs_next_flat, a_star)
-                y = reward_flat + float(gamma) * (1.0 - done_flat) * q_tp1
+            if use_pointwise:
+                with torch.no_grad():
+                    q_tp1 = tgt.q_value(seqs_next_tgt_flat, a_star)
+                    y = reward_flat + float(gamma) * (1.0 - done_flat) * q_tp1
 
-            seqs_curr_det = seqs_curr_flat.detach()
-            if use_mlp_critic:
-                emb_det = base.item_emb(action_flat).detach()
-                q_sa = mlp(torch.cat([seqs_curr_det, emb_det], dim=-1)).squeeze(-1)
+                seqs_curr_det = seqs_curr_flat.detach()
+                if use_mlp_critic:
+                    emb_det = base.item_emb(action_flat).detach()
+                    q_sa = mlp(torch.cat([seqs_curr_det, emb_det], dim=-1)).squeeze(-1)
+                else:
+                    emb_det = base.item_emb(action_flat).detach()
+                    q_sa = (seqs_curr_det * emb_det).sum(dim=-1) + base.head_q.bias[action_flat]
+                critic_loss = F.mse_loss(q_sa, y, reduction="mean")
             else:
-                emb_det = base.item_emb(action_flat).detach()
-                q_sa = (seqs_curr_det * emb_det).sum(dim=-1) + base.head_q.bias[action_flat]
-            critic_loss = F.mse_loss(q_sa, y, reduction="mean")
+                seqs_curr_det = seqs_curr_flat.detach()
+                q_curr_full = base.head_q(seqs_curr_det)
+                if pad_id >= 0 and pad_id < vocab:
+                    q_curr_full[:, pad_id] = float("-inf")
+                q_sa = q_curr_full.gather(1, action_flat[:, None]).squeeze(1)
+                with torch.no_grad():
+                    q_next_tgt_full = tgt.head_q(seqs_next_tgt_flat)
+                    if pad_id >= 0 and pad_id < vocab:
+                        q_next_tgt_full[:, pad_id] = float("-inf")
+                    q_tp1 = q_next_tgt_full.gather(1, a_star[:, None]).squeeze(1)
+                    y = reward_flat + float(gamma) * (1.0 - done_flat) * q_tp1
+                critic_loss = F.mse_loss(q_sa, y, reduction="mean")
 
             with torch.no_grad():
                 q_sa_det = q_sa.detach()
@@ -232,13 +253,22 @@ def train_crr(
                     baseline = torch.zeros_like(q_sa_det)
                 elif advantage_baseline == "max":
                     a_greedy = logits_curr.argmax(dim=1)
-                    baseline = base.q_value(seqs_curr_flat, a_greedy).detach()
+                    if use_pointwise:
+                        baseline = base.q_value(seqs_curr_flat, a_greedy).detach()
+                    else:
+                        baseline = q_curr_full.gather(1, a_greedy[:, None]).squeeze(1).detach()
                 else:
-                    q_full = logits_curr + base.head_q.bias[None, :]
-                    if pad_id >= 0 and pad_id < vocab:
-                        q_full[:, pad_id] = 0.0
                     pi = F.softmax(logits_curr, dim=1)
-                    baseline = (pi * q_full).sum(dim=1).detach()
+                    if use_pointwise:
+                        q_full = logits_curr + base.head_q.bias[None, :]
+                        if pad_id >= 0 and pad_id < vocab:
+                            q_full[:, pad_id] = 0.0
+                        baseline = (pi * q_full).sum(dim=1).detach()
+                    else:
+                        q_full0 = q_curr_full.clone()
+                        if pad_id >= 0 and pad_id < vocab:
+                            q_full0[:, pad_id] = 0.0
+                        baseline = (pi * q_full0).sum(dim=1).detach()
                 advantage = q_sa_det - baseline
 
                 if weight_type == "binary":
