@@ -120,7 +120,8 @@ def _plot_group(
     color_map = {"torch": "0.6", "rectools": "C3"}
     rows = list(rows)
 
-    fig_h = max(4.5, 0.35 * max(len(rows), 1) * 2.0 + 1.6)
+    n_cfg = len({str(cfg) for cfg, *_ in rows})
+    fig_h = max(6.0, 0.55 * max(n_cfg, 1) + 4.0)
     fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(12, fig_h), height_ratios=[1.0, 1.0, 0.55])
     if " / " in title:
         ds_title, subtitle = title.split(" / ", 1)
