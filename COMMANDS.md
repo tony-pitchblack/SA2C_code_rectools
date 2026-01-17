@@ -13,6 +13,26 @@ source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
 ```
 
+## Sampled softmax (CE) with 1/4 vocab
+
+- Add `ce_n_negatives: 0.25` to your rectools YAML config (top-level). This sets the number of sampled negatives to \(\lfloor 0.25 * item\_num \rfloor\).
+- Implementation detail: for fractional `ce_n_negatives`, training uses a matmul-based “shared negatives” construction (no per-row `[N,C,H]` embedding gather).
+- `ce_n_negatives: null` means full softmax (scores full vocab).
+- `num_val_negative_samples` (optional) controls eval candidate pool size for `bert4rec_loo` only.
+
+### persrec_tc5_2025-08-21 (bert4rec_eval)
+
+```bash
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_approx_hparams_chunks-pct=0.1.yml
+
+# DDP example (2 GPUs)
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/vocab-pct=0.25_approx_hparams_chunks-pct=0.1.yml
+```
+
 ## Plot test results (clicks + purchase ndcg@10)
 
 - Writes combined plots (rectools + torch) under `results/plots/{dataset_name}/test_results.png` and, for `persrec_tc5_*`, `results/plots/{dataset_name}/{eval_scheme}/test_results.png`.
@@ -20,59 +40,59 @@ uv pip install -r dependencies/requirements_torch.txt
 ```bash
 source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
-python scripts/plot_test_results.py  --max-metric-value 0.5
+CUDA_VISIBLE_DEVICES=3 python scripts/plot_test_results.py  --max-metric-value 0.5
 
 # examples
 # (omit --dataset to plot all datasets found under logs/)
-python scripts/plot_test_results.py --dataset retailrocket --max-metric-value 0.5
-python scripts/plot_test_results.py --max-metric-value 1.0 0.6 0.3
-python scripts/plot_test_results.py --script SA2C_SASRec_rectools --dataset persrec_tc5_2025-08-21 --eval-scheme bert4rec_eval
+CUDA_VISIBLE_DEVICES=3 python scripts/plot_test_results.py --dataset retailrocket --max-metric-value 0.5
+CUDA_VISIBLE_DEVICES=3 python scripts/plot_test_results.py --max-metric-value 1.0 0.6 0.3
+CUDA_VISIBLE_DEVICES=3 python scripts/plot_test_results.py --script SA2C_SASRec_rectools --dataset persrec_tc5_2025-08-21 --eval-scheme bert4rec_eval
 ```
 
 ## retailrocket
 ```bash
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default.yml
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/baseline.yml
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only.yml
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/baseline.yml --smoke-cpu
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_pointwise_critic.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_from_pretrained.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_from_pretrained_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_pointwise_critic_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only.yaml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only_ndcg.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml --smoke-cpu --max_steps 64
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/default.yml
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/baseline.yml
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only.yml
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/baseline.yml --smoke-cpu
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_pointwise_critic.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_from_pretrained.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_from_pretrained_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_pointwise_critic_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only.yaml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/purchase_only_ndcg.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml --smoke-cpu --max_steps 64
 ```
 
 ## yoochoose
 ```bash
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default.yml
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/baseline.yml
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only.yml
-python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/baseline.yml --smoke-cpu
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_mlp.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_from_pretrained.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_from_pretrained_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_mlp_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only.yaml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only_ndcg.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml --smoke-cpu --max_steps 64
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/default.yml
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/baseline.yml
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only.yml
+CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/baseline.yml --smoke-cpu
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_mlp.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_from_pretrained.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_from_pretrained_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_mlp_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only.yaml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/purchase_only_ndcg.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml --smoke-cpu --max_steps 64
 ```
 
 ## Optuna gridsearch (rectools)
@@ -80,8 +100,8 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/base
 ```bash
 source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline_gridsearch.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline_gridsearch.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline_gridsearch.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline_gridsearch.yml
 ```
 
 ## Optuna gridsearch (rectools) — persrec_tc5 (bert4rec_eval)
@@ -92,26 +112,40 @@ python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/b
 ```bash
 source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_gridsearch.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_gridsearch.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup_subset_10pct.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_gridsearch_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_gridsearch_chunks-pct=0.1.yml
 ```
 
 ## persrec_tc5 (BERT4Rec parquet format) — rectools
 
 - Expects parquet at `data/persrec_tc5_<calc_date>/dataset_train.parquet/` (directory of parquet part-files).
 - If missing, downloads from `<dataset.hdfs_working_prefix>/training/dataset_train.parquet` (tries `hdfs dfs -get`, then `hadoop fs -get`).
+- Add `--sanity` to any command to create/use `_sanity` artifacts without touching regular artifacts.
+
+## PLU distribution diagnostics (persrec_tc5 parquet)
 
 ```bash
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/baseline.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/baseline.yml --sanity
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline.yml --sanity
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_approx_hparams.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default.yml --sanity
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup.yml
-python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup.yml --sanity
+source .venv/bin/activate
+python scripts/plu_distribution.py --local-working-prefix /raid/data_share/antonchernov/bert4recv1/data/tc5/
+```
+
+```bash
+# sa2c_eval/
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/baseline.yml
+
+# bert4rec_eval/
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_approx_hparams.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup.yml
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup_chunks-pct=0.1.yml
+
+# DDP example (3 GPUs)
+CUDA_VISIBLE_DEVICES=5,6,7 torchrun --standalone --nproc_per_node=3 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_approx_hparams_chunks-pct=0.1.yml
 ```
 
 - Regular artifacts (created if missing):
@@ -138,6 +172,6 @@ conda env create -f dependencies/environment_tf.yml
 ## Run SA2C scripts using installed envs
 ```bash
 conda activate sa2c_code_tf
-cd Kaggle && python SA2C.py --data data
-cd RC15 && python SA2C.py --data data
+cd Kaggle && CUDA_VISIBLE_DEVICES=3 python SA2C.py --data data
+cd RC15 && CUDA_VISIBLE_DEVICES=3 python SA2C.py --data data
 ```

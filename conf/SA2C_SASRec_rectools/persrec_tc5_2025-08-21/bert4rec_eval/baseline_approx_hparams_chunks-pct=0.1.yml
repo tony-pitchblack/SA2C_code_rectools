@@ -1,19 +1,3 @@
-gridsearch:
-  enable: true
-  epochs_per_run: 3
-  metric: "overall.ndcg@10"
-  direction: "maximize"
-  n_trials: 40
-  timeout_s: 0
-  n_jobs: 1
-  seed: 0
-  n_startup_trials: 10
-  pruner:
-    enable: true
-    n_warmup_epochs: 2
-  allow_early_stopping: false
-  max_steps_per_run: 0
-
 seed: 0
 dataset:
   calc_date: "2025-08-21"
@@ -24,29 +8,27 @@ dataset:
   use_sanity_subset: false
 bert4rec_loo:
   enable: true
-  val_samples_num: 20000
-  test_samples_num: 20000
+  val_samples_num: 100_000
+  test_samples_num: 100_000
 data: data
+epoch: 50
 enable_sa2c: false
+
 purchase_only: false
 
-batch_size_train: 400
+batch_size_train: 140
 batch_size_val: 128
 num_workers_train: 0
 num_workers_val: 0
-device_id: 3
+device_id: cuda:0
 
 limit_chunks_pct: 0.1
 
-# tuned
-lr: "float(1e-4, 1e-2, log=true)"
-hidden_factor: "categorical([64, 128, 256])"
-num_blocks: "categorical([1, 2, 4])"
-num_heads: "categorical([1, 2, 4])"
-dropout_rate: "float(0.0, 0.4)"
+hidden_factor: 256
+num_heads: 8
+num_blocks: 4
+dropout_rate: 0.2
 
-# fixed
-epoch: 80
 r_click: 0.2
 r_buy: 1.0
 r_negative: -0.0
@@ -55,6 +37,8 @@ neg: 10
 weight: 1.0
 smooth: 0.0
 clip: 0.0
+
+lr: 0.001
 lr_2: 0.001
 
 sampled_loss:

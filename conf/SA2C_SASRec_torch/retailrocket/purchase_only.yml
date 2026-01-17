@@ -9,7 +9,7 @@ batch_size_train: 10500 # ~29GB GPU mem
 batch_size_val: 256
 num_workers_train: 4 # RAM consumption not tested, might blow up -> monitor
 num_workers_val: 0
-device_id: 3
+device_id: cuda:0
 
 hidden_factor: 64
 num_heads: 1

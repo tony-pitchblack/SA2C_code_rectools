@@ -21,7 +21,8 @@ from .sessions import SessionDatasetFromDF
 def load_or_build_bert4rec_splits(
     *,
     n_rows: int,
-    eligible_idx: np.ndarray,
+    eligible_val_idx: np.ndarray,
+    eligible_test_idx: np.ndarray | None = None,
     val_samples_num: int,
     test_samples_num: int,
     seed: int,
@@ -33,11 +34,20 @@ def load_or_build_bert4rec_splits(
         return z["train_idx"], z["val_idx"], z["test_idx"]
 
     n_rows = int(n_rows)
-    eligible_idx = np.asarray(eligible_idx, dtype=np.int64)
-    if eligible_idx.ndim != 1:
-        raise ValueError("eligible_idx must be 1D")
-    if eligible_idx.size == 0:
-        raise ValueError("No eligible sequences for bert4rec_loo splits")
+    eligible_val_idx = np.asarray(eligible_val_idx, dtype=np.int64)
+    if eligible_val_idx.ndim != 1:
+        raise ValueError("eligible_val_idx must be 1D")
+    if eligible_val_idx.size == 0:
+        raise ValueError("No eligible validation sequences for bert4rec_loo splits")
+
+    eligible_test_idx = eligible_val_idx if eligible_test_idx is None else np.asarray(eligible_test_idx, dtype=np.int64)
+    if eligible_test_idx.ndim != 1:
+        raise ValueError("eligible_test_idx must be 1D")
+    if eligible_test_idx.size == 0:
+        raise ValueError("No eligible test sequences for bert4rec_loo splits")
+
+    eligible_val_idx = np.unique(eligible_val_idx)
+    eligible_test_idx = np.unique(eligible_test_idx)
 
     val_samples_num = int(val_samples_num)
     test_samples_num = int(test_samples_num)
@@ -45,13 +55,14 @@ def load_or_build_bert4rec_splits(
         raise ValueError("val_samples_num and test_samples_num must be > 0 for bert4rec_loo")
 
     rng = np.random.default_rng(int(seed))
-    if int(test_samples_num) > int(eligible_idx.size):
-        raise ValueError(f"test_samples_num={test_samples_num} exceeds eligible={int(eligible_idx.size)}")
-    test_idx = rng.choice(eligible_idx, size=int(test_samples_num), replace=False)
-    remaining = np.setdiff1d(eligible_idx, test_idx, assume_unique=False)
-    if int(val_samples_num) > int(remaining.size):
-        raise ValueError(f"val_samples_num={val_samples_num} exceeds remaining eligible={int(remaining.size)}")
-    val_idx = rng.choice(remaining, size=int(val_samples_num), replace=False)
+    if int(test_samples_num) > int(eligible_test_idx.size):
+        raise ValueError(f"test_samples_num={test_samples_num} exceeds eligible_test={int(eligible_test_idx.size)}")
+    test_idx = rng.choice(eligible_test_idx, size=int(test_samples_num), replace=False)
+
+    remaining_val = np.setdiff1d(eligible_val_idx, test_idx, assume_unique=False)
+    if int(val_samples_num) > int(remaining_val.size):
+        raise ValueError(f"val_samples_num={val_samples_num} exceeds eligible_val_minus_test={int(remaining_val.size)}")
+    val_idx = rng.choice(remaining_val, size=int(val_samples_num), replace=False)
 
     all_idx = np.arange(n_rows, dtype=np.int64)
     used = np.union1d(val_idx, test_idx)
@@ -159,9 +170,12 @@ def prepare_persrec_tc5_bert4rec_loo(
             seqs.append([int(x) for x in list(seq)])
 
     counts = None
+    plu_idxs = None
     if mapped_meta_path.exists():
         z = np.load(str(mapped_meta_path))
         counts = np.asarray(z["counts"], dtype=np.int64)
+        if "plu_idxs" in getattr(z, "files", []):
+            plu_idxs = np.asarray(z["plu_idxs"], dtype=np.int64)
     if counts is None:
         counts_list: list[int] = []
         for s in seqs:
@@ -175,13 +189,26 @@ def prepare_persrec_tc5_bert4rec_loo(
     ensure_data_statis(data_statis_path, state_size=int(state_size_cfg), item_num=int(counts.shape[0]))
     ensure_pop_dict(pop_dict_path, counts=np.asarray(counts, dtype=np.int64))
 
-    eligible = np.asarray([i for i, s in enumerate(seqs) if len(s) >= 3], dtype=np.int64)
-    splits_path = base_dir / "bert4rec_eval" / (
+    if plu_idxs is None:
+        raise RuntimeError(f"Missing `plu_idxs` in mapped meta: {str(mapped_meta_path)}")
+    plu_set = set(int(x) for x in np.asarray(plu_idxs, dtype=np.int64).tolist())
+
+    eligible_test = np.asarray(
+        [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-1]) in plu_set)],
+        dtype=np.int64,
+    )
+    eligible_val = np.asarray(
+        [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-2]) in plu_set)],
+        dtype=np.int64,
+    )
+
+    splits_path = base_dir / "bert4rec_eval_plu" / (
         "dataset_splits_sanity.npz" if use_sanity_subset else "dataset_splits.npz"
     )
     train_idx, val_idx, test_idx = load_or_build_bert4rec_splits(
         n_rows=int(len(seqs)),
-        eligible_idx=eligible,
+        eligible_val_idx=eligible_val,
+        eligible_test_idx=eligible_test,
         val_samples_num=int(val_samples_num),
         test_samples_num=int(test_samples_num),
         seed=int(seed),
@@ -202,17 +229,32 @@ def prepare_sessions_bert4rec_loo(
     seed: int,
     val_samples_num: int,
     test_samples_num: int,
+    limit_chunks_pct: float | None = None,
 ) -> tuple[Dataset, Dataset, Dataset]:
     dfs = [pd.read_pickle(str(Path(data_directory) / n)) for n in list(split_df_names)]
     df = pd.concat(dfs, axis=0, ignore_index=True)
     base_ds = SessionDatasetFromDF(df)
 
     items_list = base_ds.items_list
+    is_buy_list = base_ds.is_buy_list
+    splits_root = Path(data_directory)
+    if limit_chunks_pct is not None:
+        if not (0.0 < float(limit_chunks_pct) <= 1.0):
+            raise ValueError("limit_chunks_pct must be in (0, 1]")
+        total = int(len(items_list))
+        if total <= 0:
+            raise ValueError("No sessions found")
+        n_keep = max(1, min(total, int(math.ceil(float(total) * float(limit_chunks_pct)))))
+        splits_root = splits_root / f"limit_chunks={int(n_keep)}"
+        items_list = list(items_list[: int(n_keep)])
+        is_buy_list = list(is_buy_list[: int(n_keep)])
+
     eligible = np.asarray([i for i, x in enumerate(items_list) if int(x.numel()) >= 3], dtype=np.int64)
-    splits_path = Path(data_directory) / "bert4rec_eval" / "dataset_splits.npz"
+    splits_path = splits_root / "bert4rec_eval" / "dataset_splits.npz"
     train_idx, val_idx, test_idx = load_or_build_bert4rec_splits(
         n_rows=int(len(items_list)),
-        eligible_idx=eligible,
+        eligible_val_idx=eligible,
+        eligible_test_idx=eligible,
         val_samples_num=int(val_samples_num),
         test_samples_num=int(test_samples_num),
         seed=int(seed),
@@ -229,7 +271,7 @@ def prepare_sessions_bert4rec_loo(
 
         def __getitem__(self, idx: int):
             items = items_list[int(idx)]
-            is_buy = base_ds.is_buy_list[int(idx)]
+            is_buy = is_buy_list[int(idx)]
             n_drop = 2 if bool(val_mask[int(idx)]) else 1
             if int(items.numel()) <= int(n_drop):
                 return torch.empty((0,), dtype=torch.long), torch.empty((0,), dtype=torch.long)
@@ -246,7 +288,7 @@ def prepare_sessions_bert4rec_loo(
         def __getitem__(self, i: int):
             idx = int(self.indices[int(i)])
             items = items_list[idx]
-            is_buy = base_ds.is_buy_list[idx]
+            is_buy = is_buy_list[idx]
             if int(self.drop_last) > 0:
                 items = items[: -int(self.drop_last)]
                 is_buy = is_buy[: -int(self.drop_last)]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 from pathlib import Path
@@ -8,18 +9,38 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import torch.multiprocessing as mp
 
 from .artifacts import write_results
 from .cli import parse_args
-from .config import apply_cli_overrides, is_persrec_tc5_dataset_cfg, load_config, validate_pointwise_critic_cfg
+from .config import (
+    apply_cli_overrides,
+    is_persrec_tc5_dataset_cfg,
+    load_config,
+    resolve_ce_sampling,
+    resolve_num_val_negative_samples,
+    validate_pointwise_critic_cfg,
+)
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
 from .data_utils.persrec_tc5 import prepare_persrec_tc5
+from .data_utils.albert4rec import make_albert4rec_loader
 from .data_utils.sessions import SessionDataset, make_session_loader
+from .distributed import (
+    barrier,
+    ddp_cleanup,
+    ddp_setup,
+    find_free_port,
+    is_distributed,
+    is_rank0,
+    parse_cuda_devices,
+    silence_logging_if_needed,
+)
 from .logging_utils import configure_logging, dump_config
-from .models import SASRecBaselineRectools, SASRecQNetworkRectools
+from .models import Albert4Rec, SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
-from .metrics import evaluate, evaluate_loo
+from .metrics import evaluate, evaluate_albert4rec_loo, evaluate_loo, evaluate_loo_candidates
 from .gridsearch import run_optuna_gridsearch
+from .training.albert4rec import train_albert4rec
 from .training.baseline import train_baseline
 from .training.sa2c import train_sa2c
 
@@ -35,12 +56,39 @@ def _infer_eval_scheme_from_config_path(config_path: str, *, dataset_name: str) 
     return None
 
 
-def main():
-    args = parse_args()
+def _select_device(*, cfg: dict, smoke_cpu: bool) -> torch.device:
+    if bool(smoke_cpu):
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        if is_distributed():
+            return torch.device(f"cuda:{int(torch.cuda.current_device())}")
+        dev = cfg.get("device_id", None)
+        if isinstance(dev, int):
+            return torch.device(f"cuda:{int(dev)}")
+        if isinstance(dev, str):
+            s = dev.strip()
+            if s.startswith("cuda"):
+                return torch.device(s)
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def _worker_main(
+    *,
+    cfg: dict,
+    args,
+    local_rank: int,
+    world_size: int,
+    device_ids: list[int] | None,
+) -> None:
+    silence_logging_if_needed(is_rank0=is_rank0())
     eval_only = bool(getattr(args, "eval_only", False))
+    continue_training = bool(getattr(args, "continue_training", False))
     config_path = args.config
-    cfg = load_config(config_path)
-    cfg = apply_cli_overrides(cfg, args)
+
+    model_type = str(cfg.get("model_type", "sasrec")).strip().lower()
+    if model_type not in {"sasrec", "albert4rec"}:
+        raise ValueError("model_type must be one of: sasrec | albert4rec")
 
     if str(cfg.get("early_stopping_metric", "ndcg@10")) != "ndcg@10":
         raise ValueError("Only early_stopping_metric='ndcg@10' is supported.")
@@ -95,8 +143,9 @@ def main():
                 raise ValueError(f"pretrained_backbone.{k} must be a float or null") from e
         cfg["pretrained_backbone"] = pretrained_backbone_cfg
 
-    configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
-    dump_config(cfg, run_dir)
+    if is_rank0():
+        configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
+        dump_config(cfg, run_dir)
 
     logger = logging.getLogger(__name__)
     logger.info("run_dir: %s", str(run_dir))
@@ -111,14 +160,18 @@ def main():
 
     bert4rec_loo_cfg = cfg.get("bert4rec_loo") or {}
     use_bert4rec_loo = bool(isinstance(bert4rec_loo_cfg, dict) and bool(bert4rec_loo_cfg.get("enable", False)))
-    val_samples_num = int(bert4rec_loo_cfg.get("val_samples_num", 0)) if use_bert4rec_loo else 0
-    test_samples_num = int(bert4rec_loo_cfg.get("test_samples_num", 0)) if use_bert4rec_loo else 0
+    val_split_samples_num = int(bert4rec_loo_cfg.get("val_samples_num", 0)) if use_bert4rec_loo else 0
+    test_split_samples_num = int(bert4rec_loo_cfg.get("test_samples_num", 0)) if use_bert4rec_loo else 0
     sanity = bool(getattr(args, "sanity", False)) or bool(cfg.get("sanity", False))
     if use_bert4rec_loo and sanity:
         cap = 1000
-        val_samples_num = min(int(val_samples_num), int(cap))
-        test_samples_num = min(int(test_samples_num), int(cap))
-    eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
+        val_split_samples_num = min(int(val_split_samples_num), int(cap))
+        test_split_samples_num = min(int(test_split_samples_num), int(cap))
+    if model_type == "albert4rec":
+        if not bool(use_bert4rec_loo):
+            raise ValueError("albert4rec is supported only with bert4rec_loo.enable=true (bert4rec_eval)")
+        if bool(enable_sa2c):
+            raise ValueError("albert4rec requires enable_sa2c=false")
 
     for k in ("limit_train_batches", "limit_val_batches", "limit_test_batches"):
         v = cfg.get(k, None)
@@ -134,8 +187,8 @@ def main():
             raise ValueError("limit_chunks_pct must be a float in [0, 1]") from e
         if not (0.0 < float(limit_chunks_pct) <= 1.0):
             raise ValueError("limit_chunks_pct must be a float in (0, 1]")
-        if not persrec_tc5:
-            raise ValueError("limit_chunks_pct is supported only for persrec_tc5 dataset configs (for now)")
+        if (not persrec_tc5) and (not use_bert4rec_loo):
+            raise ValueError("limit_chunks_pct for sessions datasets requires bert4rec_loo.enable=true")
         if bool(sanity):
             raise ValueError("limit_chunks_pct cannot be used together with --sanity")
 
@@ -143,18 +196,17 @@ def main():
     max_steps = int(cfg.get("max_steps", 0))
 
     smoke_cpu = bool(getattr(args, "smoke_cpu", False))
+    if smoke_cpu and is_distributed():
+        raise ValueError("--smoke-cpu is not supported with DDP (WORLD_SIZE>1)")
     if smoke_cpu:
-        device = torch.device("cpu")
         num_epochs = 1
         train_batch_size = 8
         val_batch_size = 8
         train_num_workers = 0
         val_num_workers = 0
-    else:
-        if torch.cuda.is_available():
-            device = torch.device(f"cuda:{int(cfg.get('device_id', 0))}")
-        else:
-            device = torch.device("cpu")
+    device = _select_device(cfg=cfg, smoke_cpu=smoke_cpu)
+    if device.type == "cuda" and (not is_distributed()) and device.index is not None:
+        torch.cuda.set_device(int(device.index))
 
     if bool(cfg.get("debug", False)) and device.type == "cuda":
         torch.backends.cuda.enable_flash_sdp(False)
@@ -170,8 +222,8 @@ def main():
                 dataset_name=dataset_name,
                 dataset_cfg=dict(dataset_cfg),
                 seed=int(cfg.get("seed", 0)),
-                val_samples_num=int(val_samples_num),
-                test_samples_num=int(test_samples_num),
+                val_samples_num=int(val_split_samples_num),
+                test_samples_num=int(test_split_samples_num),
                 limit_chunks_pct=limit_chunks_pct,
             )
         else:
@@ -202,6 +254,45 @@ def main():
             int(cfg.get("num_heads", 1)),
             int(item_num),
         )
+
+    ce_loss_vocab_size, ce_full_vocab_size, ce_vocab_pct, _ = resolve_ce_sampling(cfg=cfg, item_num=item_num)
+
+    eval_neg_samples_num, eval_neg_vocab_pct = resolve_num_val_negative_samples(cfg=cfg, item_num=item_num)
+
+    sampled_negatives = None
+    if use_bert4rec_loo and model_type != "albert4rec":
+        if eval_neg_samples_num is None:
+            sampled_negatives = torch.arange(1, int(item_num) + 1, device=device, dtype=torch.long)
+        else:
+            with open(str(pop_dict_path), "r") as f:
+                pop_dict = eval(f.read())
+            if not isinstance(pop_dict, dict):
+                raise ValueError("pop_dict must be a dict mapping item_id -> probability")
+            pairs = []
+            for k, v in pop_dict.items():
+                kk = int(k)
+                if 0 <= kk < int(item_num):
+                    pairs.append((kk, float(v)))
+            pairs.sort(key=lambda kv: kv[1], reverse=True)
+            k = int(min(int(eval_neg_samples_num), int(item_num)))
+            top_ids = [kk + 1 for kk, _ in pairs[:k]]
+            sampled_negatives = torch.as_tensor(top_ids, device=device, dtype=torch.long)
+
+    if use_bert4rec_loo and model_type != "albert4rec":
+
+        def eval_fn(model, session_loader, reward_click, reward_buy, device, **kwargs):
+            return evaluate_loo_candidates(
+                model,
+                session_loader,
+                reward_click,
+                reward_buy,
+                device,
+                sampled_negatives=sampled_negatives,
+                **kwargs,
+            )
+
+    else:
+        eval_fn = evaluate_loo if use_bert4rec_loo else evaluate
 
     reward_click = float(cfg.get("r_click", 0.2))
     reward_buy = float(cfg.get("r_buy", 1.0))
@@ -234,8 +325,9 @@ def main():
                 data_directory=data_directory,
                 split_df_names=["sampled_train.df", "sampled_val.df", "sampled_test.df"],
                 seed=int(cfg.get("seed", 0)),
-                val_samples_num=int(val_samples_num),
-                test_samples_num=int(test_samples_num),
+                val_samples_num=int(val_split_samples_num),
+                test_samples_num=int(test_split_samples_num),
+                limit_chunks_pct=limit_chunks_pct,
             )
             train_ds_s = 0.0
             val_ds_s = 0.0
@@ -260,14 +352,25 @@ def main():
         val_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_val.df")
         val_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    val_dl = make_session_loader(
-        val_ds,
-        batch_size=val_batch_size,
-        num_workers=val_num_workers,
-        pin_memory=pin_memory,
-        pad_item=item_num,
-        shuffle=False,
-    )
+    if model_type == "albert4rec":
+        val_dl = make_albert4rec_loader(
+            val_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            state_size=int(state_size),
+            purchase_only=bool(purchase_only),
+            shuffle=False,
+        )
+    else:
+        val_dl = make_session_loader(
+            val_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            pad_item=item_num,
+            shuffle=False,
+        )
     val_dl_s = time.perf_counter() - t0
 
     if (not persrec_tc5) and (not use_bert4rec_loo):
@@ -275,46 +378,84 @@ def main():
         test_ds = SessionDataset(data_directory=data_directory, split_df_name="sampled_test.df")
         test_ds_s = time.perf_counter() - t0
     t0 = time.perf_counter()
-    test_dl = make_session_loader(
-        test_ds,
-        batch_size=val_batch_size,
-        num_workers=val_num_workers,
-        pin_memory=pin_memory,
-        pad_item=item_num,
-        shuffle=False,
-    )
+    if model_type == "albert4rec":
+        test_dl = make_albert4rec_loader(
+            test_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            state_size=int(state_size),
+            purchase_only=bool(purchase_only),
+            shuffle=False,
+        )
+    else:
+        test_dl = make_session_loader(
+            test_ds,
+            batch_size=val_batch_size,
+            num_workers=val_num_workers,
+            pin_memory=pin_memory,
+            pad_item=item_num,
+            shuffle=False,
+        )
     test_dl_s = time.perf_counter() - t0
 
     gs_cfg = cfg.get("gridsearch") or {}
+    if is_distributed() and bool(gs_cfg.get("enable", False)):
+        raise ValueError("gridsearch.enable=true is not supported with DDP")
+    if model_type == "albert4rec" and bool(gs_cfg.get("enable", False)):
+        raise ValueError("gridsearch is not supported for albert4rec")
+    if continue_training and bool(gs_cfg.get("enable", False)):
+        raise ValueError("--continue is not supported with gridsearch.enable=true")
     if eval_only:
+        if is_distributed() and (not is_rank0()):
+            barrier()
+            return
         best_path = run_dir / "best_model.pt"
         if not best_path.exists():
             raise FileNotFoundError(f"Missing checkpoint: {best_path}")
 
-        if enable_sa2c:
-            best_model = SASRecQNetworkRectools(
+        a4_cfg = cfg.get("albert4rec") or {}
+        intermediate_size = a4_cfg.get("intermediate_size", None) if isinstance(a4_cfg, dict) else None
+        if intermediate_size is not None:
+            intermediate_size = int(intermediate_size)
+
+        if model_type == "albert4rec":
+            best_model = Albert4Rec(
                 item_num=item_num,
                 state_size=state_size,
                 hidden_size=int(cfg.get("hidden_factor", 64)),
                 num_heads=int(cfg.get("num_heads", 1)),
-                num_blocks=int(cfg.get("num_blocks", 1)),
+                num_layers=int(cfg.get("num_blocks", 1)),
                 dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-                pointwise_critic_use=pointwise_critic_use,
-                pointwise_critic_arch=pointwise_critic_arch,
-                pointwise_critic_mlp=pointwise_mlp_cfg,
+                intermediate_size=intermediate_size,
             ).to(device)
+            eval_fn_eff = evaluate_albert4rec_loo
         else:
-            best_model = SASRecBaselineRectools(
-                item_num=item_num,
-                state_size=state_size,
-                hidden_size=int(cfg.get("hidden_factor", 64)),
-                num_heads=int(cfg.get("num_heads", 1)),
-                num_blocks=int(cfg.get("num_blocks", 1)),
-                dropout_rate=float(cfg.get("dropout_rate", 0.1)),
-            ).to(device)
+            if enable_sa2c:
+                best_model = SASRecQNetworkRectools(
+                    item_num=item_num,
+                    state_size=state_size,
+                    hidden_size=int(cfg.get("hidden_factor", 64)),
+                    num_heads=int(cfg.get("num_heads", 1)),
+                    num_blocks=int(cfg.get("num_blocks", 1)),
+                    dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                    pointwise_critic_use=pointwise_critic_use,
+                    pointwise_critic_arch=pointwise_critic_arch,
+                    pointwise_critic_mlp=pointwise_mlp_cfg,
+                ).to(device)
+            else:
+                best_model = SASRecBaselineRectools(
+                    item_num=item_num,
+                    state_size=state_size,
+                    hidden_size=int(cfg.get("hidden_factor", 64)),
+                    num_heads=int(cfg.get("num_heads", 1)),
+                    num_blocks=int(cfg.get("num_blocks", 1)),
+                    dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+                ).to(device)
+            eval_fn_eff = eval_fn
         best_model.load_state_dict(torch.load(best_path, map_location=device))
 
-        val_best = eval_fn(
+        val_best = eval_fn_eff(
             best_model,
             val_dl,
             reward_click,
@@ -325,8 +466,11 @@ def main():
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
-        test_best = eval_fn(
+        test_best = eval_fn_eff(
             best_model,
             test_dl,
             reward_click,
@@ -337,12 +481,17 @@ def main():
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
 
         val_warmup = None
         test_warmup = None
-        if enable_sa2c:
-            warmup_path = run_dir / "best_warmup_model.pt"
+        if enable_sa2c and model_type != "albert4rec":
+            warmup_path = run_dir / "best_model_warmup.pt"
+            if not warmup_path.exists():
+                warmup_path = run_dir / "best_warmup_model.pt"
             if warmup_path.exists():
                 warmup_model = SASRecQNetworkRectools(
                     item_num=item_num,
@@ -367,6 +516,9 @@ def main():
                     state_size=state_size,
                     item_num=item_num,
                     purchase_only=purchase_only,
+                    ce_loss_vocab_size=ce_loss_vocab_size,
+                    ce_full_vocab_size=ce_full_vocab_size,
+                    ce_vocab_pct=ce_vocab_pct,
                 )
                 test_warmup = eval_fn(
                     warmup_model,
@@ -379,6 +531,9 @@ def main():
                     state_size=state_size,
                     item_num=item_num,
                     purchase_only=purchase_only,
+                    ce_loss_vocab_size=ce_loss_vocab_size,
+                    ce_full_vocab_size=ce_full_vocab_size,
+                    ce_vocab_pct=ce_vocab_pct,
                 )
 
         write_results(
@@ -389,6 +544,8 @@ def main():
             test_warmup=test_warmup,
             smoke_cpu=smoke_cpu,
         )
+        if is_distributed():
+            barrier()
         return
 
     if bool(gs_cfg.get("enable", False)):
@@ -415,7 +572,42 @@ def main():
         )
         return
 
-    if enable_sa2c:
+    if model_type == "albert4rec":
+        a4_cfg = cfg.get("albert4rec") or {}
+        intermediate_size = a4_cfg.get("intermediate_size", None) if isinstance(a4_cfg, dict) else None
+        if intermediate_size is not None:
+            intermediate_size = int(intermediate_size)
+        best_path = train_albert4rec(
+            cfg=cfg,
+            train_ds=train_ds,
+            val_dl=val_dl,
+            run_dir=run_dir,
+            device=device,
+            reward_click=reward_click,
+            reward_buy=reward_buy,
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+            num_epochs=num_epochs,
+            num_batches=num_batches,
+            train_batch_size=train_batch_size,
+            train_num_workers=train_num_workers,
+            pin_memory=pin_memory,
+            max_steps=max_steps,
+        )
+        warmup_path = None
+        best_model = Albert4Rec(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_layers=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            intermediate_size=intermediate_size,
+        ).to(device)
+        best_model.load_state_dict(torch.load(best_path, map_location=device))
+        eval_fn_eff = evaluate_albert4rec_loo
+    elif enable_sa2c:
         best_path, warmup_path = train_sa2c(
             cfg=cfg,
             train_ds=train_ds,
@@ -437,6 +629,10 @@ def main():
             max_steps=max_steps,
             reward_fn=reward_fn,
             evaluate_fn=eval_fn,
+            continue_training=continue_training,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         best_model = SASRecQNetworkRectools(
             item_num=item_num,
@@ -469,6 +665,9 @@ def main():
             pin_memory=pin_memory,
             max_steps=max_steps,
             evaluate_fn=eval_fn,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         warmup_path = None
         best_model = SASRecBaselineRectools(
@@ -480,8 +679,16 @@ def main():
             dropout_rate=float(cfg.get("dropout_rate", 0.1)),
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
+        eval_fn_eff = eval_fn
 
-    val_best = eval_fn(
+    if model_type != "albert4rec":
+        eval_fn_eff = eval_fn
+
+    if is_distributed() and (not is_rank0()):
+        barrier()
+        return
+
+    val_best = eval_fn_eff(
         best_model,
         val_dl,
         reward_click,
@@ -492,8 +699,11 @@ def main():
         state_size=state_size,
         item_num=item_num,
         purchase_only=purchase_only,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
     )
-    test_best = eval_fn(
+    test_best = eval_fn_eff(
         best_model,
         test_dl,
         reward_click,
@@ -504,11 +714,14 @@ def main():
         state_size=state_size,
         item_num=item_num,
         purchase_only=purchase_only,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
     )
 
     val_warmup = None
     test_warmup = None
-    if warmup_path is not None and Path(warmup_path).exists():
+    if warmup_path is not None and Path(warmup_path).exists() and model_type != "albert4rec":
         warmup_model = SASRecQNetworkRectools(
             item_num=item_num,
             state_size=state_size,
@@ -533,6 +746,9 @@ def main():
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
         test_warmup = eval_fn(
             warmup_model,
@@ -545,6 +761,9 @@ def main():
             state_size=state_size,
             item_num=item_num,
             purchase_only=purchase_only,
+            ce_loss_vocab_size=ce_loss_vocab_size,
+            ce_full_vocab_size=ce_full_vocab_size,
+            ce_vocab_pct=ce_vocab_pct,
         )
 
     write_results(
@@ -554,6 +773,69 @@ def main():
         val_warmup=val_warmup,
         test_warmup=test_warmup,
         smoke_cpu=smoke_cpu,
+    )
+    if is_distributed():
+        barrier()
+
+
+def _spawn_entry(
+    local_rank: int,
+    world_size: int,
+    device_ids: list[int],
+    cfg: dict,
+    args,
+) -> None:
+    silence_logging_if_needed(is_rank0=(int(local_rank) == 0))
+    os.environ["RANK"] = str(int(local_rank))
+    os.environ["LOCAL_RANK"] = str(int(local_rank))
+    os.environ["WORLD_SIZE"] = str(int(world_size))
+    device_idx = int(device_ids[int(local_rank)])
+    torch.cuda.set_device(int(device_idx))
+    ddp_setup(world_size=int(world_size))
+    try:
+        _worker_main(cfg=cfg, args=args, local_rank=int(local_rank), world_size=int(world_size), device_ids=device_ids)
+    finally:
+        ddp_cleanup()
+
+
+def main():
+    args = parse_args()
+    config_path = args.config
+    cfg = load_config(config_path)
+    cfg = apply_cli_overrides(cfg, args)
+
+    world_size_env = int(os.environ.get("WORLD_SIZE", "1") or "1")
+    if world_size_env > 1:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0") or "0")
+        silence_logging_if_needed(is_rank0=(int(local_rank) == 0))
+        if not torch.cuda.is_available():
+            raise RuntimeError("WORLD_SIZE>1 but CUDA is not available")
+        n_visible = int(torch.cuda.device_count())
+        if local_rank < 0 or local_rank >= n_visible:
+            raise RuntimeError(f"Invalid LOCAL_RANK={local_rank} for visible cuda device_count={n_visible}")
+        torch.cuda.set_device(int(local_rank))
+        ddp_setup(world_size=int(world_size_env))
+        try:
+            _worker_main(cfg=cfg, args=args, local_rank=int(local_rank), world_size=int(world_size_env), device_ids=None)
+        finally:
+            ddp_cleanup()
+        return
+
+    device_ids = parse_cuda_devices(cfg.get("device_id", None))
+    if len(device_ids) <= 1:
+        if len(device_ids) == 1 and torch.cuda.is_available():
+            torch.cuda.set_device(int(device_ids[0]))
+        _worker_main(cfg=cfg, args=args, local_rank=0, world_size=1, device_ids=device_ids if device_ids else None)
+        return
+
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", str(find_free_port()))
+    world_size = int(len(device_ids))
+    mp.spawn(
+        _spawn_entry,
+        args=(world_size, device_ids, cfg, args),
+        nprocs=world_size,
+        join=True,
     )
 
 

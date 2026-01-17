@@ -82,6 +82,26 @@ def ndcg_reward_from_logits(ce_logits: torch.Tensor, action_t: torch.Tensor) -> 
     return 1.0 / torch.log2(rank + 1.0)
 
 
+def _log_ce_vocab(
+    logger: logging.Logger,
+    *,
+    ce_loss_vocab_size: int | None,
+    ce_full_vocab_size: int | None,
+    ce_vocab_pct: float | None,
+) -> None:
+    if ce_loss_vocab_size is None:
+        return
+    if ce_vocab_pct is not None and ce_full_vocab_size is not None:
+        logger.info(
+            "ce_loss_vocab_size=%d (full=%d vocab_pct=%s)",
+            int(ce_loss_vocab_size),
+            int(ce_full_vocab_size),
+            str(ce_vocab_pct),
+        )
+    else:
+        logger.info("ce_loss_vocab_size=%d", int(ce_loss_vocab_size))
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -97,6 +117,9 @@ def evaluate(
     debug: bool = False,
     epoch=None,
     num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ):
     total_clicks = 0.0
     total_purchase = 0.0
@@ -187,6 +210,12 @@ def evaluate(
         prefix = ""
     logger.info("#############################################################")
     logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -218,6 +247,9 @@ def evaluate_loo(
     debug: bool = False,
     epoch=None,
     num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
 ):
     total_clicks = 0.0
     total_purchase = 0.0
@@ -308,6 +340,290 @@ def evaluate_loo(
         prefix = ""
     logger.info("#############################################################")
     logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
+    logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
+    for k in topk:
+        logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        logger.info("clicks hr ndcg @ %d: %f, %f", k, float(click[f"hr@{k}"]), float(click[f"ndcg@{k}"]))
+        logger.info("purchase hr ndcg @ %d: %f, %f", k, float(purchase[f"hr@{k}"]), float(purchase[f"ndcg@{k}"]))
+    logger.info("#############################################################")
+    logger.info("")
+
+    return {
+        "topk": topk,
+        "click": click,
+        "purchase": purchase,
+        "overall": overall,
+    }
+
+
+@torch.no_grad()
+def evaluate_loo_candidates(
+    model,
+    session_loader,
+    reward_click,
+    reward_buy,
+    device,
+    *,
+    sampled_negatives: torch.Tensor,
+    split: str = "val",
+    state_size: int,
+    item_num: int,
+    purchase_only: bool = False,
+    debug: bool = False,
+    epoch=None,
+    num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
+):
+    if sampled_negatives.ndim != 1:
+        raise ValueError(f"sampled_negatives must have shape [N], got {tuple(sampled_negatives.shape)}")
+    sampled_negatives = sampled_negatives.to(device=device, dtype=torch.long)
+
+    total_clicks = 0.0
+    total_purchase = 0.0
+    topk = [5, 10, 15, 20]
+
+    hit_clicks = [0.0, 0.0, 0.0, 0.0]
+    ndcg_clicks = [0.0, 0.0, 0.0, 0.0]
+    hit_purchase = [0.0, 0.0, 0.0, 0.0]
+    ndcg_purchase = [0.0, 0.0, 0.0, 0.0]
+
+    model.eval()
+    for items_pad, is_buy_pad, lengths in tqdm(
+        session_loader,
+        desc=str(split),
+        unit="batch",
+        dynamic_ncols=True,
+        leave=False,
+    ):
+        step = make_shifted_batch_from_sessions(
+            items_pad,
+            is_buy_pad,
+            lengths,
+            state_size=int(state_size),
+            old_pad_item=int(item_num),
+            purchase_only=bool(purchase_only),
+        )
+        if step is None:
+            continue
+        states_x = step["states_x"].to(device, non_blocking=True)
+        actions = step["actions"].to(device, non_blocking=True)
+        is_buy = step["is_buy"].to(device, non_blocking=True)
+        done_mask = step["done_mask"].to(device, non_blocking=True)
+
+        ce_logits_seq = extract_ce_logits_seq(model(states_x))
+        if debug and (not torch.isfinite(ce_logits_seq).all()):
+            raise FloatingPointError("Non-finite ce_logits during evaluation")
+
+        ce_logits = ce_logits_seq[done_mask]
+        action_t = actions[done_mask].to(torch.long)
+        is_buy_t = is_buy[done_mask]
+        reward_t = torch.where(is_buy_t == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+        if int(action_t.numel()) == 0:
+            continue
+
+        bsz = int(action_t.shape[0])
+        nneg = int(sampled_negatives.numel())
+        cand_ids = torch.empty((bsz, 1 + nneg), device=device, dtype=torch.long)
+        cand_ids[:, 0] = action_t
+        if nneg > 0:
+            cand_ids[:, 1:] = sampled_negatives[None, :].expand(bsz, nneg)
+
+        cand_logits = ce_logits.gather(1, cand_ids)
+        target = cand_logits[:, 0:1]
+        rank = (cand_logits > target).sum(dim=1).to(torch.float32) + 1.0
+
+        is_click = reward_t == float(reward_click)
+        is_purchase = ~is_click
+        total_clicks += float(is_click.sum().item())
+        total_purchase += float(is_purchase.sum().item())
+
+        for i, k in enumerate(topk):
+            hit = rank <= float(k)
+            ndcg = torch.where(hit, 1.0 / torch.log2(rank + 1.0), torch.zeros_like(rank))
+
+            if bool(is_click.any()):
+                hit_clicks[i] += float((hit & is_click).sum().item())
+                ndcg_clicks[i] += float((ndcg * is_click.to(ndcg.dtype)).sum().item())
+            if bool(is_purchase.any()):
+                hit_purchase[i] += float((hit & is_purchase).sum().item())
+                ndcg_purchase[i] += float((ndcg * is_purchase.to(ndcg.dtype)).sum().item())
+
+    click = {}
+    purchase = {}
+    overall = {}
+    denom_all = float(total_clicks + total_purchase)
+    for i, k in enumerate(topk):
+        hr_click = hit_clicks[i] / total_clicks if total_clicks > 0 else 0.0
+        hr_purchase = hit_purchase[i] / total_purchase if total_purchase > 0 else 0.0
+        ng_click = ndcg_clicks[i] / total_clicks if total_clicks > 0 else 0.0
+        ng_purchase = ndcg_purchase[i] / total_purchase if total_purchase > 0 else 0.0
+        click[f"hr@{k}"] = float(hr_click)
+        click[f"ndcg@{k}"] = float(ng_click)
+        purchase[f"hr@{k}"] = float(hr_purchase)
+        purchase[f"ndcg@{k}"] = float(ng_purchase)
+        overall[f"ndcg@{k}"] = float((ndcg_clicks[i] + ndcg_purchase[i]) / denom_all) if denom_all > 0 else 0.0
+
+    logger = logging.getLogger(__name__)
+    if epoch is not None and num_epochs is not None:
+        prefix = f"epoch {int(epoch)}/{int(num_epochs)} "
+    elif epoch is not None:
+        prefix = f"epoch {int(epoch)} "
+    else:
+        prefix = ""
+    logger.info("#############################################################")
+    logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
+    logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
+    for k in topk:
+        logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        logger.info("clicks hr ndcg @ %d: %f, %f", k, float(click[f"hr@{k}"]), float(click[f"ndcg@{k}"]))
+        logger.info("purchase hr ndcg @ %d: %f, %f", k, float(purchase[f"hr@{k}"]), float(purchase[f"ndcg@{k}"]))
+    logger.info("#############################################################")
+    logger.info("")
+
+    return {
+        "topk": topk,
+        "click": click,
+        "purchase": purchase,
+        "overall": overall,
+    }
+
+
+@torch.no_grad()
+def evaluate_albert4rec_loo(
+    model,
+    session_loader,
+    reward_click,
+    reward_buy,
+    device,
+    *,
+    split: str = "val",
+    state_size: int,
+    item_num: int,
+    purchase_only: bool = False,
+    debug: bool = False,
+    epoch=None,
+    num_epochs=None,
+    ce_loss_vocab_size: int | None = None,
+    ce_full_vocab_size: int | None = None,
+    ce_vocab_pct: float | None = None,
+):
+    _ = purchase_only
+    total_clicks = 0.0
+    total_purchase = 0.0
+    topk = [5, 10, 15, 20]
+
+    total_reward = [0.0, 0.0, 0.0, 0.0]
+    hit_clicks = [0.0, 0.0, 0.0, 0.0]
+    ndcg_clicks = [0.0, 0.0, 0.0, 0.0]
+    hit_purchase = [0.0, 0.0, 0.0, 0.0]
+    ndcg_purchase = [0.0, 0.0, 0.0, 0.0]
+
+    mask_id = int(item_num) + 1
+    model.eval()
+    for input_ids, is_buy in tqdm(
+        session_loader,
+        desc=str(split),
+        unit="batch",
+        dynamic_ncols=True,
+        leave=False,
+    ):
+        input_ids = input_ids.to(device, non_blocking=True).to(torch.long)
+        is_buy = is_buy.to(device, non_blocking=True).to(torch.long)
+        if int(input_ids.shape[1]) != int(state_size):
+            raise ValueError(f"Expected input_ids shape [B,{int(state_size)}], got {tuple(input_ids.shape)}")
+
+        nonpad = input_ids.ne(0)
+        lengths = nonpad.sum(dim=1).to(torch.long)
+        keep = lengths.gt(0)
+        if not bool(keep.any()):
+            continue
+        if not bool(keep.all()):
+            input_ids = input_ids[keep]
+            is_buy = is_buy[keep]
+            lengths = lengths[keep]
+
+        bsz = int(input_ids.shape[0])
+        last_idx = (lengths - 1).clamp(min=0).to(torch.long)
+        rows = torch.arange(bsz, device=device)
+        true_items = input_ids[rows, last_idx]
+        is_buy_t = is_buy[rows, last_idx]
+        reward_t = torch.where(is_buy_t == 1, float(reward_buy), float(reward_click)).to(torch.float32)
+
+        masked = input_ids.clone()
+        masked[rows, last_idx] = int(mask_id)
+        h = model(masked)
+        if debug and (not torch.isfinite(h).all()):
+            raise FloatingPointError("Non-finite hidden states during evaluation")
+        h_last = h[rows, last_idx]
+        ce_logits = model.full_item_scores(h_last)
+
+        kmax = int(max(topk))
+        vals, idx = torch.topk(ce_logits, k=kmax, dim=1, largest=True, sorted=False)
+        order = vals.argsort(dim=1)
+        idx_sorted = idx.gather(1, order)
+        sorted_list = idx_sorted.detach().cpu().numpy()
+
+        actions_np = true_items.detach().cpu().numpy()
+        rewards_np = reward_t.detach().cpu().numpy()
+        total_clicks += float((rewards_np == reward_click).sum())
+        total_purchase += float((rewards_np != reward_click).sum())
+        calculate_hit(
+            sorted_list,
+            topk,
+            actions_np,
+            rewards_np,
+            reward_click,
+            total_reward,
+            hit_clicks,
+            ndcg_clicks,
+            hit_purchase,
+            ndcg_purchase,
+        )
+
+    click = {}
+    purchase = {}
+    overall = {}
+    denom_all = float(total_clicks + total_purchase)
+    for i, k in enumerate(topk):
+        hr_click = hit_clicks[i] / total_clicks if total_clicks > 0 else 0.0
+        hr_purchase = hit_purchase[i] / total_purchase if total_purchase > 0 else 0.0
+        ng_click = ndcg_clicks[i] / total_clicks if total_clicks > 0 else 0.0
+        ng_purchase = ndcg_purchase[i] / total_purchase if total_purchase > 0 else 0.0
+        click[f"hr@{k}"] = float(hr_click)
+        click[f"ndcg@{k}"] = float(ng_click)
+        purchase[f"hr@{k}"] = float(hr_purchase)
+        purchase[f"ndcg@{k}"] = float(ng_purchase)
+        overall[f"ndcg@{k}"] = float((ndcg_clicks[i] + ndcg_purchase[i]) / denom_all) if denom_all > 0 else 0.0
+
+    logger = logging.getLogger(__name__)
+    if epoch is not None and num_epochs is not None:
+        prefix = f"epoch {int(epoch)}/{int(num_epochs)} "
+    elif epoch is not None:
+        prefix = f"epoch {int(epoch)} "
+    else:
+        prefix = ""
+    logger.info("#############################################################")
+    logger.info("%s%s metrics", prefix, str(split))
+    _log_ce_vocab(
+        logger,
+        ce_loss_vocab_size=ce_loss_vocab_size,
+        ce_full_vocab_size=ce_full_vocab_size,
+        ce_vocab_pct=ce_vocab_pct,
+    )
     logger.info("total clicks: %d, total purchase: %d", int(total_clicks), int(total_purchase))
     for k in topk:
         logger.info("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -359,6 +675,8 @@ def summary_at_k_text(val_metrics: dict, test_metrics: dict, k: int):
 __all__ = [
     "evaluate",
     "evaluate_loo",
+    "evaluate_loo_candidates",
+    "evaluate_albert4rec_loo",
     "calculate_hit",
     "ndcg_reward_from_logits",
     "get_metric_value",

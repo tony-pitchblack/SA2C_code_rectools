@@ -1,0 +1,72 @@
+gridsearch:
+  enable: true
+  epochs_per_run: 3
+  metric: "overall.ndcg@10"
+  direction: "maximize"
+  n_trials: 40
+  timeout_s: 0
+  n_jobs: 1
+  seed: 0
+  n_startup_trials: 10
+  pruner:
+    enable: true
+    n_warmup_epochs: 2
+  allow_early_stopping: false
+  max_steps_per_run: 0
+
+seed: 0
+dataset:
+  calc_date: "2025-08-21"
+  hdfs_working_prefix: "hdfs:///user/antonchernov/bert4recv1/tc5/"
+  user_column: loyalty_cardholder_rk
+  product_column: product_id
+  state_size: 50
+  use_sanity_subset: false
+bert4rec_loo:
+  enable: true
+  val_samples_num: 100_000
+  test_samples_num: 100_000
+data: data
+epoch: 80
+enable_sa2c: true
+reward_fn: click_buy
+
+limit_chunks_pct: 0.1
+
+# phase1-only during gridsearch runs
+warmup_epochs: 3
+
+purchase_only: false
+
+batch_size_train: 200
+batch_size_val: 128
+num_workers_train: 0
+num_workers_val: 0
+device_id: cuda:0
+
+hidden_factor: 64
+num_heads: 1
+num_blocks: 1
+dropout_rate: 0.1
+
+r_click: 0.2
+r_buy: 1.0
+r_negative: "float(-1.0, 0.0)"
+discount: "float(0.2, 0.99)"
+neg: "categorical([1, 5, 10, 20])"
+weight: "float(0.1, 5.0, log=true)"
+smooth: "float(0.0, 2.0)"
+clip: "float(0.0, 5.0)"
+
+lr: "float(1e-4, 1e-2, log=true)"
+lr_2: "float(1e-4, 1e-2, log=true)"
+
+sampled_loss:
+  use: false
+
+max_steps: 0
+debug: false
+
+early_stopping_ep: 10
+early_stopping_metric: ndcg@10
+

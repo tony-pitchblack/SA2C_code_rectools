@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import numpy as np
 import yaml
 
 
 def default_config() -> dict:
     return {
+        "model_type": "sasrec",
         "gridsearch": {
             "enable": False,
             "metric": "overall.ndcg@10",
@@ -52,6 +54,14 @@ def default_config() -> dict:
         },
         "discount": 0.5,
         "neg": 10,
+        # Backward-compat alias for num_val_negative_samples (eval candidate pool size for bert4rec_loo).
+        "val_samples_num": None,
+        # Bert4recv1-style: number of eval negatives (popular items) used as candidates.
+        # - null -> full vocabulary candidates
+        # - int  -> use top-K popular items
+        # - float in (0, 1] -> use ceil(vocab * pct) popular items
+        "num_val_negative_samples": None,
+        "ce_n_negatives": None,
         "sampled_loss": {
             "use": False,
             "ce_n_negatives": 256,
@@ -69,6 +79,11 @@ def default_config() -> dict:
             "enable": False,
             "val_samples_num": 0,
             "test_samples_num": 0,
+        },
+        "albert4rec": {
+            "masking_proba": 0.2,
+            "n_negatives": 256,
+            "intermediate_size": None,
         },
         "weight": 1.0,
         "smooth": 0.0,
@@ -115,6 +130,80 @@ def is_persrec_tc5_dataset_cfg(dataset_cfg) -> bool:
     return isinstance(dataset_cfg, dict) and ("calc_date" in dataset_cfg)
 
 
+def _resolve_ce_n_negatives_cfg(cfg: dict):
+    if "ce_n_negatives" in cfg:
+        v = cfg.get("ce_n_negatives", None)
+        if v is not None:
+            return v
+    sampled_cfg = cfg.get("sampled_loss") or {}
+    if isinstance(sampled_cfg, dict) and ("ce_n_negatives" in sampled_cfg):
+        return sampled_cfg.get("ce_n_negatives", None)
+    return None
+
+
+def resolve_ce_sampling(*, cfg: dict, item_num: int) -> tuple[int, int, float | None, int | None]:
+    full_vocab = int(item_num)
+    raw = _resolve_ce_n_negatives_cfg(cfg)
+    if raw is None:
+        return full_vocab, full_vocab, None, None
+    if isinstance(raw, bool):
+        return full_vocab, full_vocab, None, None
+    try:
+        if isinstance(raw, int):
+            nneg = int(raw)
+            if nneg <= 0:
+                return 1, full_vocab, None, 0
+            return 1 + nneg, full_vocab, None, nneg
+        x = float(raw)
+    except Exception:
+        return full_vocab, full_vocab, None, None
+
+    if x >= 1.0:
+        return full_vocab, full_vocab, None, None
+    if x <= 0.0:
+        return 1, full_vocab, 0.0, 0
+    nneg = int(full_vocab * x)
+    if nneg <= 0:
+        return 1, full_vocab, float(x), 0
+    return 1 + nneg, full_vocab, float(x), nneg
+
+
+def resolve_num_val_negative_samples(*, cfg: dict, item_num: int) -> tuple[int | None, float | None]:
+    """
+    Bert4recv1-style eval candidate pool size (shared negatives list):
+    - None -> full vocab
+    - int  -> top-K popular items
+    - float in (0,1] -> ceil(item_num * pct)
+    """
+    raw = cfg.get("num_val_negative_samples", None)
+    if raw is None and ("val_samples_num" in cfg):
+        raw = cfg.get("val_samples_num", None)
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool):
+        return None, None
+    if isinstance(raw, int):
+        k = int(raw)
+        if k < 0:
+            raise ValueError("num_val_negative_samples must be null or a non-negative int/float")
+        return k, None
+    try:
+        x = float(raw)
+    except Exception as e:
+        raise ValueError("num_val_negative_samples must be null or a non-negative int/float") from e
+    if x < 0.0:
+        raise ValueError("num_val_negative_samples must be null or a non-negative int/float")
+    if x == 0.0:
+        return 0, 0.0
+    if 0.0 < x <= 1.0:
+        k = int(np.ceil(float(item_num) * float(x)))
+        return max(0, min(int(k), int(item_num))), float(x)
+    if float(x).is_integer():
+        k = int(x)
+        return max(0, min(int(k), int(item_num))), None
+    raise ValueError("num_val_negative_samples as float must be in (0,1] or an integer-valued float")
+
+
 def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
     pointwise_cfg = cfg.get("pointwise_critic") or {}
     if not isinstance(pointwise_cfg, dict):
@@ -147,5 +236,13 @@ def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
     return use, arch, {"hidden_sizes": [int(x) for x in hidden_sizes], "dropout_rate": float(dropout_rate_f)}
 
 
-__all__ = ["default_config", "load_config", "apply_cli_overrides", "is_persrec_tc5_dataset_cfg", "validate_pointwise_critic_cfg"]
+__all__ = [
+    "default_config",
+    "load_config",
+    "apply_cli_overrides",
+    "is_persrec_tc5_dataset_cfg",
+    "validate_pointwise_critic_cfg",
+    "resolve_ce_sampling",
+    "resolve_num_val_negative_samples",
+]
 
