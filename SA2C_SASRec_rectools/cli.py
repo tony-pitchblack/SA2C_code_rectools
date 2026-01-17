@@ -23,6 +23,13 @@ def parse_args():
     parser.add_argument("--early_stopping_ep", type=int, default=None, help="Patience epochs for early stopping.")
     parser.add_argument("--early_stopping_metric", type=str, default=None, help="Early stopping metric (ndcg@10).")
     parser.add_argument("--max_steps", type=int, default=None, help="If set, stop after this many update steps.")
+    parser.add_argument(
+        "--plu-filter",
+        dest="plu_filter",
+        choices=("enable", "disable", "inverse"),
+        default=argparse.SUPPRESS,
+        help="persrec_tc5 only: enable (default), disable, inverse.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging and NaN checks (overrides config).")
     parser.add_argument(
         "--smoke-cpu",

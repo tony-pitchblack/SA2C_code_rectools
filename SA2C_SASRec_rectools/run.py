@@ -120,6 +120,13 @@ def _worker_main(
     repo_root = Path(__file__).resolve().parent.parent
     dataset_cfg = cfg.get("dataset", "retailrocket")
     persrec_tc5 = is_persrec_tc5_dataset_cfg(dataset_cfg)
+    plu_filter_raw = getattr(args, "plu_filter", None)
+    if persrec_tc5:
+        plu_filter_mode = "enable" if plu_filter_raw is None else str(plu_filter_raw)
+    else:
+        if plu_filter_raw is not None:
+            raise ValueError("--plu-filter is supported only for persrec_tc5 datasets")
+        plu_filter_mode = None
     if persrec_tc5:
         calc_date = str(dataset_cfg.get("calc_date"))
         dataset_name = f"persrec_tc5_{calc_date}"
@@ -253,6 +260,7 @@ def _worker_main(
                 seed=int(cfg.get("seed", 0)),
                 val_samples_num=int(val_split_samples_num),
                 test_samples_num=int(test_split_samples_num),
+                plu_filter=str(plu_filter_mode),
                 limit_chunks_pct=limit_chunks_pct,
             )
         else:

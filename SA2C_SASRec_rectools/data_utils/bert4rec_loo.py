@@ -123,6 +123,7 @@ def prepare_persrec_tc5_bert4rec_loo(
     seed: int,
     val_samples_num: int,
     test_samples_num: int,
+    plu_filter: str,
     limit_chunks_pct: float | None = None,
 ) -> tuple[str, Path, Path, Dataset, Dataset, Dataset]:
     use_sanity_subset = bool(dataset_cfg.get("use_sanity_subset", False))
@@ -189,22 +190,41 @@ def prepare_persrec_tc5_bert4rec_loo(
     ensure_data_statis(data_statis_path, state_size=int(state_size_cfg), item_num=int(counts.shape[0]))
     ensure_pop_dict(pop_dict_path, counts=np.asarray(counts, dtype=np.int64))
 
-    if plu_idxs is None:
-        raise RuntimeError(f"Missing `plu_idxs` in mapped meta: {str(mapped_meta_path)}")
-    plu_set = set(int(x) for x in np.asarray(plu_idxs, dtype=np.int64).tolist())
+    mode = str(plu_filter).strip().lower()
+    if mode not in {"enable", "disable", "inverse"}:
+        raise ValueError("plu_filter must be one of: enable | disable | inverse")
 
-    eligible_test = np.asarray(
-        [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-1]) in plu_set)],
-        dtype=np.int64,
-    )
-    eligible_val = np.asarray(
-        [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-2]) in plu_set)],
-        dtype=np.int64,
-    )
+    if mode == "disable":
+        eligible = np.asarray([i for i, s in enumerate(seqs) if (len(s) >= 3)], dtype=np.int64)
+        eligible_test = eligible
+        eligible_val = eligible
+        splits_dir = "bert4rec_eval"
+    else:
+        if plu_idxs is None:
+            raise RuntimeError(f"Missing `plu_idxs` in mapped meta: {str(mapped_meta_path)}")
+        plu_set = set(int(x) for x in np.asarray(plu_idxs, dtype=np.int64).tolist())
+        if mode == "enable":
+            eligible_test = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-1]) in plu_set)],
+                dtype=np.int64,
+            )
+            eligible_val = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-2]) in plu_set)],
+                dtype=np.int64,
+            )
+            splits_dir = "bert4rec_eval_plu"
+        else:
+            eligible_test = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-1]) not in plu_set)],
+                dtype=np.int64,
+            )
+            eligible_val = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-2]) not in plu_set)],
+                dtype=np.int64,
+            )
+            splits_dir = "bert4rec_eval_nonplu"
 
-    splits_path = base_dir / "bert4rec_eval_plu" / (
-        "dataset_splits_sanity.npz" if use_sanity_subset else "dataset_splits.npz"
-    )
+    splits_path = base_dir / str(splits_dir) / ("dataset_splits_sanity.npz" if use_sanity_subset else "dataset_splits.npz")
     train_idx, val_idx, test_idx = load_or_build_bert4rec_splits(
         n_rows=int(len(seqs)),
         eligible_val_idx=eligible_val,
