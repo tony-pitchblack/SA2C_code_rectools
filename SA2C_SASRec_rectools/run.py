@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import shutil
 import time
 from pathlib import Path
 
@@ -143,13 +144,15 @@ def _worker_main(
         and logs_root in config_p.parents
     )
     if use_run_dir_from_config:
-        run_dir = config_p.parent
+        config_name = config_p.parent.name
     else:
         config_name = Path(config_path).stem
         if bool(getattr(args, "sanity", False)):
             config_name = f"{config_name}_sanity"
-        eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
-        run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
+    eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
+    if persrec_tc5 and eval_scheme == "bert4rec_eval" and plu_filter_mode in {"disable", "inverse"}:
+        eval_scheme = f"bert4rec_eval_plu-{'disable' if plu_filter_mode == 'disable' else 'inverse'}"
+    run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
 
     pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
     if not isinstance(pretrained_backbone_cfg, dict):
@@ -449,7 +452,15 @@ def _worker_main(
         if is_distributed() and (not is_rank0()):
             barrier()
             return
-        best_path = run_dir / "best_model.pt"
+        ckpt_run_dir = run_dir
+        if persrec_tc5 and eval_scheme in {"bert4rec_eval_plu-disable", "bert4rec_eval_plu-inverse"}:
+            ckpt_run_dir = make_run_dir(dataset_name, config_name, eval_scheme="bert4rec_eval")
+            for fname in ("best_model.pt", "best_model_warmup.pt", "config.yml"):
+                src = ckpt_run_dir / fname
+                if src.exists():
+                    shutil.copy2(str(src), str(run_dir / fname))
+
+        best_path = ckpt_run_dir / "best_model.pt"
         if not best_path.exists():
             raise FileNotFoundError(f"Missing checkpoint: {best_path}")
 
@@ -532,9 +543,9 @@ def _worker_main(
         val_warmup = None
         test_warmup = None
         if enable_sa2c and model_type != "albert4rec":
-            warmup_path = run_dir / "best_model_warmup.pt"
+            warmup_path = ckpt_run_dir / "best_model_warmup.pt"
             if not warmup_path.exists():
-                warmup_path = run_dir / "best_warmup_model.pt"
+                warmup_path = ckpt_run_dir / "best_warmup_model.pt"
             if warmup_path.exists():
                 warmup_model = SASRecQNetworkRectools(
                     item_num=item_num,
