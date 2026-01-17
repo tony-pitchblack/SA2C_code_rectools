@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +55,30 @@ def _iter_result_pairs(root: Path):
         if not purchase_path.exists():
             continue
         yield run_dir, clicks_path, purchase_path
+
+
+def _iter_run_dirs_with_best_model(root: Path):
+    tqdm = _tqdm()
+    ckpt_paths = list(root.rglob("best_model.pt"))
+    for ckpt_path in tqdm(ckpt_paths, desc=f"scan {root.name}", unit="run"):
+        yield ckpt_path.parent
+
+
+def _force_eval_run_dir(*, script_name: str, run_dir: Path) -> None:
+    cfg_path = run_dir / "config.yml"
+    if not cfg_path.exists():
+        cfg_path = run_dir / "config.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Missing config file in run dir: {run_dir}")
+
+    repo_root = _repo_root()
+    if script_name == "SA2C_SASRec_rectools":
+        cmd = [sys.executable, "-m", "SA2C_SASRec_rectools", "--config", str(cfg_path), "--eval-only"]
+    elif script_name == "SA2C_SASRec_torch":
+        cmd = [sys.executable, str(repo_root / "SA2C_SASRec_torch.py"), "--config", str(cfg_path), "--eval-only"]
+    else:
+        raise ValueError(f"Unsupported script: {script_name}")
+    subprocess.run(cmd, cwd=str(repo_root), check=True)
 
 
 def _extract_group_and_config(*, script_name: str, script_root: Path, run_dir: Path):
@@ -272,6 +298,7 @@ def _build_plots(
     only_dataset: str | None,
     only_eval_scheme: str | None,
     max_metric_values: list[float] | None,
+    force_eval: bool,
 ):
     tqdm = _tqdm()
     by_group: dict[_GroupKey, dict[str, dict[str, tuple[float, float, float]]]] = {}
@@ -284,6 +311,23 @@ def _build_plots(
             continue
 
         source = "torch" if script_name == "SA2C_SASRec_torch" else "rectools"
+        if force_eval:
+            for run_dir in _iter_run_dirs_with_best_model(script_root):
+                parsed = _extract_group_and_config(script_name=script_name, script_root=script_root, run_dir=run_dir)
+                if parsed is None:
+                    continue
+                group_key, _ = parsed
+                if only_dataset is not None and group_key.dataset_name != only_dataset:
+                    continue
+                if only_eval_scheme is not None and group_key.eval_scheme != only_eval_scheme:
+                    continue
+
+                clicks_path = run_dir / "results_clicks.csv"
+                purchase_path = run_dir / "results_purchase.csv"
+                if clicks_path.exists() and purchase_path.exists():
+                    continue
+                _force_eval_run_dir(script_name=script_name, run_dir=run_dir)
+
         for run_dir, clicks_path, purchase_path in _iter_result_pairs(script_root):
             parsed = _extract_group_and_config(script_name=script_name, script_root=script_root, run_dir=run_dir)
             if parsed is None:
@@ -355,6 +399,11 @@ def main() -> None:
     p.add_argument("--dataset", default=None)
     p.add_argument("--eval-scheme", default=None)
     p.add_argument(
+        "--force-eval",
+        action="store_true",
+        help="Re-evaluate runs with best_model.pt but missing results CSVs before plotting.",
+    )
+    p.add_argument(
         "--max-metric-value",
         nargs="*",
         type=float,
@@ -373,6 +422,7 @@ def main() -> None:
         only_dataset=args.dataset,
         only_eval_scheme=args.eval_scheme,
         max_metric_values=args.max_metric_value,
+        force_eval=bool(args.force_eval),
     )
 
 

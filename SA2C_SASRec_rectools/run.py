@@ -128,11 +128,21 @@ def _worker_main(
         dataset_name = str(dataset_cfg)
         dataset_root = resolve_dataset_root(dataset_name)
 
-    config_name = Path(config_path).stem
-    if bool(getattr(args, "sanity", False)):
-        config_name = f"{config_name}_sanity"
-    eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
-    run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
+    config_p = Path(config_path).resolve()
+    logs_root = (repo_root / "logs" / "SA2C_SASRec_rectools").resolve()
+    use_run_dir_from_config = (
+        (eval_only or continue_training)
+        and config_p.name in {"config.yml", "config.yaml"}
+        and logs_root in config_p.parents
+    )
+    if use_run_dir_from_config:
+        run_dir = config_p.parent
+    else:
+        config_name = Path(config_path).stem
+        if bool(getattr(args, "sanity", False)):
+            config_name = f"{config_name}_sanity"
+        eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
+        run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
 
     pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
     if not isinstance(pretrained_backbone_cfg, dict):

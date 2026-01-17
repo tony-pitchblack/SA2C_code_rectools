@@ -26,6 +26,11 @@ except Exception:  # pragma: no cover
 def parse_args():
     parser = argparse.ArgumentParser(description="Train SA2C (Torch) with SASRec Q-network.")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config.")
+    parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Skip training; evaluate existing best_model.pt in the corresponding run_dir and write results.",
+    )
     parser.add_argument("--early_stopping_ep", type=int, default=None, help="Patience epochs for early stopping.")
     parser.add_argument("--early_stopping_metric", type=str, default=None, help="Early stopping metric (ndcg@10).")
     parser.add_argument("--max_steps", type=int, default=None, help="If set, stop after this many update steps.")
@@ -528,6 +533,7 @@ def _summary_at_k_text(val_metrics: dict, test_metrics: dict, k: int):
 
 def main():
     args = parse_args()
+    eval_only = bool(getattr(args, "eval_only", False))
     config_path = args.config
     cfg = _load_config(config_path)
     cfg = _apply_cli_overrides(cfg, args)
@@ -542,8 +548,15 @@ def main():
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
     dataset_name = str(cfg.get("dataset", "retailrocket"))
     dataset_root = _resolve_dataset_root(dataset_name)
-    config_name = Path(config_path).stem
-    run_dir = _make_run_dir(dataset_name, config_name)
+    repo_root = Path(__file__).resolve().parent
+    config_p = Path(config_path).resolve()
+    logs_root = (repo_root / "logs" / "SA2C_SASRec_torch").resolve()
+    use_run_dir_from_config = eval_only and config_p.name in {"config.yml", "config.yaml"} and logs_root in config_p.parents
+    if use_run_dir_from_config:
+        run_dir = config_p.parent
+    else:
+        config_name = Path(config_path).stem
+        run_dir = _make_run_dir(dataset_name, config_name)
     _configure_logging(run_dir, debug=bool(cfg.get("debug", False)))
     _dump_config(cfg, run_dir)
 
@@ -700,6 +713,91 @@ def main():
     best_metric = float("-inf")
     epochs_since_improve = 0
     stop_training = False
+
+    if eval_only:
+        best_path = run_dir / "best_model.pt"
+        if not best_path.exists():
+            raise FileNotFoundError(f"Missing checkpoint: {best_path}")
+
+        best_model = (SASRecQNetworkTorch if enable_sa2c else SASRecBaselineTorch)(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+        ).to(device)
+        best_model.load_state_dict(torch.load(best_path, map_location=device))
+
+        val_best = evaluate(
+            best_model,
+            val_dl,
+            reward_click,
+            reward_buy,
+            device,
+            debug=bool(cfg.get("debug", False)),
+            split="val(best)",
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+        )
+        test_best = evaluate(
+            best_model,
+            test_dl,
+            reward_click,
+            reward_buy,
+            device,
+            debug=bool(cfg.get("debug", False)),
+            split="test(best)",
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+        )
+
+        val_click = _metrics_row(val_best, "click")
+        test_click = _metrics_row(test_best, "click")
+        val_purchase = _metrics_row(val_best, "purchase")
+        test_purchase = _metrics_row(test_best, "purchase")
+        val_overall = _overall_row(val_best)
+        test_overall = _overall_row(test_best)
+
+        col_order = []
+        for k in val_best["topk"]:
+            col_order.extend([f"val/hr@{k}", f"test/hr@{k}", f"val/ndcg@{k}", f"test/ndcg@{k}"])
+
+        click_row = {}
+        purchase_row = {}
+        for k in val_best["topk"]:
+            click_row[f"val/hr@{k}"] = float(val_click.get(f"hr@{k}", 0.0))
+            click_row[f"test/hr@{k}"] = float(test_click.get(f"hr@{k}", 0.0))
+            click_row[f"val/ndcg@{k}"] = float(val_click.get(f"ndcg@{k}", 0.0))
+            click_row[f"test/ndcg@{k}"] = float(test_click.get(f"ndcg@{k}", 0.0))
+
+            purchase_row[f"val/hr@{k}"] = float(val_purchase.get(f"hr@{k}", 0.0))
+            purchase_row[f"test/hr@{k}"] = float(test_purchase.get(f"hr@{k}", 0.0))
+            purchase_row[f"val/ndcg@{k}"] = float(val_purchase.get(f"ndcg@{k}", 0.0))
+            purchase_row[f"test/ndcg@{k}"] = float(test_purchase.get(f"ndcg@{k}", 0.0))
+
+        if not smoke_cpu:
+            df_clicks = pd.DataFrame([click_row], index=["metrics"]).loc[:, col_order]
+            df_purchase = pd.DataFrame([purchase_row], index=["metrics"]).loc[:, col_order]
+            df_clicks.to_csv(run_dir / "results_clicks.csv", index=False)
+            df_purchase.to_csv(run_dir / "results_purchase.csv", index=False)
+
+        overall_col_order = []
+        for k in val_best["topk"]:
+            overall_col_order.extend([f"val/ndcg@{k}", f"test/ndcg@{k}"])
+        overall_row = {}
+        for k in val_best["topk"]:
+            overall_row[f"val/ndcg@{k}"] = float(val_overall.get(f"ndcg@{k}", 0.0))
+            overall_row[f"test/ndcg@{k}"] = float(test_overall.get(f"ndcg@{k}", 0.0))
+        if not smoke_cpu:
+            df_overall = pd.DataFrame([overall_row], index=["metrics"]).loc[:, overall_col_order]
+            df_overall.to_csv(run_dir / "results.csv", index=False)
+
+            with open(run_dir / "summary@10.txt", "w") as f:
+                f.write(_summary_at_k_text(val_best, test_best, k=10))
+        return
 
     for epoch_idx in range(num_epochs):
         if bool(cfg.get("debug", False)):
