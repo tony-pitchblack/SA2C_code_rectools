@@ -27,7 +27,7 @@ lr: 0.005
 max_steps: 0
 debug: false
 
-early_stopping_ep: 10
+early_stopping_ep: 5
 early_stopping_metric: ndcg@10
 
 pointwise_critic:
