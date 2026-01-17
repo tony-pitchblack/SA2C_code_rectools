@@ -142,7 +142,7 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_chunks-pct=0.1.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup.yml
-CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default_auto_warmup_chunks-pct=0.1.yml
 
 # DDP example (3 GPUs)
 CUDA_VISIBLE_DEVICES=5,6,7 torchrun --standalone --nproc_per_node=3 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_approx_hparams_chunks-pct=0.1.yml
