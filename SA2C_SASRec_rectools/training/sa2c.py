@@ -200,6 +200,8 @@ def train_sa2c(
     else:
         _, _, _, ce_n_neg_eff = resolve_ce_sampling(cfg=cfg, item_num=item_num)
 
+    eval_fn = evaluate if evaluate_fn is None else evaluate_fn
+
     early_patience = int(cfg.get("early_stopping_ep", 5))
     warmup_patience_cfg = cfg.get("early_stopping_warmup_ep", None)
     warmup_patience = None if warmup_patience_cfg is None else int(warmup_patience_cfg)
@@ -212,13 +214,15 @@ def train_sa2c(
     legacy_warmup_path = run_dir / "best_warmup_model.pt"
     best_phase2_path = run_dir / "best_model.pt"
 
-    best_metric_phase2 = float("-inf")
+    best_metric_overall = float("-inf")
+    best_metric_phase2_local = float("-inf")
     epochs_since_improve_phase2 = 0
 
     phase = "warmup" if use_auto_warmup else "scheduled"
     warmup_best_metric_scalar = float("-inf")
     warmup_baseline_finalized = False
     entered_finetune = False
+    phase2_seeded_from_warmup = False
 
     resume_phase2 = False
     resume_phase1 = False
@@ -236,11 +240,36 @@ def train_sa2c(
         state = torch.load(str(ckpt_path), map_location=device)
         _unwrap(qn1).load_state_dict(state)
         _unwrap(qn2).load_state_dict(state)
+        _logger = logging.getLogger(__name__)
+        _prev_disabled = bool(getattr(_logger, "disabled", False))
+        _logger.disabled = True
+        try:
+            resume_metrics = eval_fn(
+                qn1,
+                val_dl,
+                reward_click,
+                reward_buy,
+                device,
+                debug=bool(cfg.get("debug", False)),
+                split="val(resume)",
+                state_size=state_size,
+                item_num=item_num,
+                purchase_only=purchase_only,
+                ce_loss_vocab_size=ce_loss_vocab_size,
+                ce_full_vocab_size=ce_full_vocab_size,
+                ce_vocab_pct=ce_vocab_pct,
+            )
+        finally:
+            _logger.disabled = _prev_disabled
+        best_metric_overall = float(get_metric_value(resume_metrics, metric_key))
         if resume_phase2:
             entered_finetune = True
             warmup_baseline_finalized = True
             warmup_best_metric_scalar = float("-inf")
             phase = "finetune" if use_auto_warmup else "scheduled"
+            phase2_seeded_from_warmup = True
+        else:
+            best_metric_warmup = float(best_metric_overall)
 
     for epoch_idx in range(num_epochs):
         if num_batches > 0:
@@ -313,8 +342,19 @@ def train_sa2c(
                         warmup_best_metric_scalar = float(best_metric_warmup)
                         warmup_baseline_finalized = True
                     if phase == "scheduled":
-                        best_metric_phase2 = float("-inf")
+                        best_metric_phase2_local = float("-inf")
                         epochs_since_improve_phase2 = 0
+                if (phase == "scheduled") and (not phase2_seeded_from_warmup) and (not resume_phase2):
+                    warmup_ckpt = best_warmup_path if best_warmup_path.exists() else legacy_warmup_path
+                    if warmup_ckpt.exists():
+                        state = torch.load(str(warmup_ckpt), map_location=device)
+                        _unwrap(qn1).load_state_dict(state)
+                        _unwrap(qn2).load_state_dict(state)
+                        if is_rank0():
+                            torch.save(state, best_phase2_path)
+                        if np.isfinite(best_metric_warmup) and best_metric_warmup > float("-inf"):
+                            best_metric_overall = float(best_metric_warmup)
+                    phase2_seeded_from_warmup = True
 
             sampled_cfg = cfg.get("sampled_loss") or {}
             use_sampled_loss = bool(sampled_cfg.get("use", False))
@@ -546,7 +586,6 @@ def train_sa2c(
                 opt2.step()
                 total_step += int(step_count)
 
-        eval_fn = evaluate if evaluate_fn is None else evaluate_fn
         val_metrics = eval_fn(
             qn1,
             val_dl,
@@ -602,6 +641,7 @@ def train_sa2c(
         if use_auto_warmup and phase == "warmup":
             if metric > best_metric_warmup:
                 best_metric_warmup = metric
+                best_metric_overall = float(best_metric_warmup)
                 epochs_since_improve_warmup = 0
                 if is_rank0():
                     torch.save(best_state_for_epoch, best_warmup_path)
@@ -620,12 +660,23 @@ def train_sa2c(
                 warmup_best_metric_scalar = float(best_metric_warmup)
                 warmup_baseline_finalized = True
                 entered_finetune = True
+                warmup_ckpt = None
                 if best_warmup_path.exists():
-                    _unwrap(qn1).load_state_dict(torch.load(best_warmup_path, map_location=device))
-                    _unwrap(qn2).load_state_dict(torch.load(best_warmup_path, map_location=device))
+                    warmup_ckpt = best_warmup_path
+                elif legacy_warmup_path.exists():
+                    warmup_ckpt = legacy_warmup_path
+                if warmup_ckpt is not None:
+                    state = torch.load(str(warmup_ckpt), map_location=device)
+                    _unwrap(qn1).load_state_dict(state)
+                    _unwrap(qn2).load_state_dict(state)
+                    if is_rank0():
+                        torch.save(state, best_phase2_path)
+                    if np.isfinite(best_metric_warmup) and best_metric_warmup > float("-inf"):
+                        best_metric_overall = float(best_metric_warmup)
                 phase = "finetune"
-                best_metric_phase2 = float("-inf")
+                best_metric_phase2_local = float("-inf")
                 epochs_since_improve_phase2 = 0
+                phase2_seeded_from_warmup = True
                 logger.info("warmup early stopping triggered -> switching to phase2 finetune")
 
         elif use_auto_warmup and phase == "finetune":
@@ -640,19 +691,21 @@ def train_sa2c(
                     float(metric - warmup_best_metric_scalar),
                     float(warmup_best_metric_scalar),
                 )
-            if metric > best_metric_phase2:
-                best_metric_phase2 = metric
+            if metric > best_metric_phase2_local:
+                best_metric_phase2_local = metric
                 epochs_since_improve_phase2 = 0
-                if is_rank0():
-                    torch.save(best_state_for_epoch, best_phase2_path)
-                    logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_phase2))
+                if metric > best_metric_overall:
+                    best_metric_overall = metric
+                    if is_rank0():
+                        torch.save(best_state_for_epoch, best_phase2_path)
+                        logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_overall))
             else:
                 epochs_since_improve_phase2 += 1
                 logger.info(
                     "finetune no improvement (val %s=%f best=%f) patience=%d/%d",
                     str(metric_key),
                     float(metric),
-                    float(best_metric_phase2),
+                    float(best_metric_phase2_local),
                     int(epochs_since_improve_phase2),
                     int(early_patience),
                 )
@@ -665,6 +718,7 @@ def train_sa2c(
             ) > 0.0:
                 if metric > best_metric_warmup:
                     best_metric_warmup = metric
+                    best_metric_overall = float(best_metric_warmup)
                     if is_rank0():
                         torch.save(best_state_for_epoch, best_warmup_path)
                         logger.info("best_model_warmup.pt updated (val ndcg@10=%f)", float(best_metric_warmup))
@@ -682,19 +736,21 @@ def train_sa2c(
                         float(warmup_best_metric_scalar),
                     )
                 if (not use_auto_warmup) and phase == "scheduled":
-                    if metric > best_metric_phase2:
-                        best_metric_phase2 = metric
+                    if metric > best_metric_phase2_local:
+                        best_metric_phase2_local = metric
                         epochs_since_improve_phase2 = 0
-                        if is_rank0():
-                            torch.save(best_state_for_epoch, best_phase2_path)
-                            logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_phase2))
+                        if metric > best_metric_overall:
+                            best_metric_overall = metric
+                            if is_rank0():
+                                torch.save(best_state_for_epoch, best_phase2_path)
+                                logger.info("best_model.pt updated (val %s=%f)", str(metric_key), float(best_metric_overall))
                     else:
                         epochs_since_improve_phase2 += 1
                         logger.info(
                             "finetune no improvement (val %s=%f best=%f) patience=%d/%d",
                             str(metric_key),
                             float(metric),
-                            float(best_metric_phase2),
+                            float(best_metric_phase2_local),
                             int(epochs_since_improve_phase2),
                             int(early_patience),
                         )
@@ -714,8 +770,9 @@ def train_sa2c(
     elif legacy_warmup_path.exists():
         warmup_path = legacy_warmup_path
     if entered_finetune or best_phase2_path.exists():
-        if is_rank0() and (not best_phase2_path.exists()):
-            torch.save(_unwrap(qn1).state_dict(), best_phase2_path)
+        if is_rank0() and (not best_phase2_path.exists()) and (warmup_path is not None) and warmup_path.exists():
+            state = torch.load(str(warmup_path), map_location=device)
+            torch.save(state, best_phase2_path)
         return best_phase2_path, warmup_path
     if warmup_path is None:
         if is_rank0():
