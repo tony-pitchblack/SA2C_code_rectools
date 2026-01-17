@@ -37,6 +37,8 @@ def default_config() -> dict:
             "advantage_baseline": "max",
             "tau": 0.005,
             "critic_loss_weight": 1.0,
+            "actor_lr": None,
+            "critic_lr": None,
             "gamma": 0.5,
         },
         "warmup_epochs": 0.02,

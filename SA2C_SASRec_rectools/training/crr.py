@@ -74,6 +74,8 @@ def train_crr(
     if not (0.0 <= gamma <= 1.0):
         raise ValueError("crr.gamma must be in [0, 1]")
     critic_loss_weight = float(crr_cfg.get("critic_loss_weight", 1.0))
+    actor_lr = float(crr_cfg.get("actor_lr", cfg.get("lr", 0.005)))
+    critic_lr = float(crr_cfg.get("critic_lr", cfg.get("lr", 0.005)))
 
     pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
     if not bool(pointwise_critic_use):
@@ -116,7 +118,9 @@ def train_crr(
     for p in target.parameters():
         p.requires_grad_(False)
 
-    opt = torch.optim.Adam(_unwrap(online).parameters(), lr=float(cfg.get("lr", 0.005)))
+    base = _unwrap(online)
+    actor_opt = torch.optim.Adam(list(base.backbone_parameters()), lr=float(actor_lr))
+    critic_opt = torch.optim.Adam(list(base.critic_parameters()), lr=float(critic_lr))
 
     total_step = 0
     early_patience = int(cfg.get("early_stopping_ep", 5))
@@ -146,6 +150,10 @@ def train_crr(
         tgt = target
         pad_id = int(getattr(base, "pad_id", 0))
         vocab = int(item_num) + 1
+        use_mlp_critic = str(getattr(base, "pointwise_critic_arch", "dot")) == "mlp"
+        mlp = getattr(base, "pointwise_critic_mlp", None)
+        if use_mlp_critic and mlp is None:
+            raise RuntimeError("pointwise_critic_mlp is not initialized")
 
         for _, batch in enumerate(
             tqdm(
@@ -204,11 +212,18 @@ def train_crr(
             else:
                 reward_flat = torch.where(is_buy_flat == 1, float(reward_buy), float(reward_click)).to(torch.float32)
 
-            q_sa = base.q_value(seqs_curr_flat, action_flat)
             a_star = logits_next.argmax(dim=1)
             with torch.no_grad():
                 q_tp1 = tgt.q_value(seqs_next_flat, a_star)
                 y = reward_flat + float(gamma) * (1.0 - done_flat) * q_tp1
+
+            seqs_curr_det = seqs_curr_flat.detach()
+            if use_mlp_critic:
+                emb_det = base.item_emb(action_flat).detach()
+                q_sa = mlp(torch.cat([seqs_curr_det, emb_det], dim=-1)).squeeze(-1)
+            else:
+                emb_det = base.item_emb(action_flat).detach()
+                q_sa = (seqs_curr_det * emb_det).sum(dim=-1) + base.head_q.bias[action_flat]
             critic_loss = F.mse_loss(q_sa, y, reduction="mean")
 
             with torch.no_grad():
@@ -235,13 +250,19 @@ def train_crr(
             actor_loss = F.cross_entropy(logits_curr, action_flat, reduction="none")
             actor_loss = (actor_loss * weight).mean()
 
-            loss = actor_loss + float(critic_loss_weight) * critic_loss
-            if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
-                raise FloatingPointError(f"Non-finite loss (crr) at total_step={int(total_step)}")
+            critic_obj = float(critic_loss_weight) * critic_loss
+            if bool(cfg.get("debug", False)) and (not torch.isfinite(critic_obj).all()):
+                raise FloatingPointError(f"Non-finite critic loss (crr) at total_step={int(total_step)}")
+            critic_opt.zero_grad(set_to_none=True)
+            critic_obj.backward()
+            critic_opt.step()
 
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+            if bool(cfg.get("debug", False)) and (not torch.isfinite(actor_loss).all()):
+                raise FloatingPointError(f"Non-finite actor loss (crr) at total_step={int(total_step)}")
+            actor_opt.zero_grad(set_to_none=True)
+            actor_loss.backward()
+            actor_opt.step()
+
             _soft_update_(target=tgt, online=base, tau=float(tau))
 
             total_step += int(step_count)
