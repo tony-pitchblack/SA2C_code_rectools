@@ -19,6 +19,7 @@ from .config import (
     load_config,
     resolve_ce_sampling,
     resolve_num_val_negative_samples,
+    resolve_trainer,
     validate_pointwise_critic_cfg,
 )
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
@@ -42,6 +43,7 @@ from .metrics import evaluate, evaluate_albert4rec_loo, evaluate_loo, evaluate_l
 from .gridsearch import run_optuna_gridsearch
 from .training.albert4rec import train_albert4rec
 from .training.baseline import train_baseline
+from .training.crr import train_crr
 from .training.sa2c import train_sa2c
 
 
@@ -95,7 +97,8 @@ def _worker_main(
     reward_fn = str(cfg.get("reward_fn", "click_buy"))
     if reward_fn not in {"click_buy", "ndcg"}:
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
-    enable_sa2c = bool(cfg.get("enable_sa2c", True))
+    trainer = resolve_trainer(cfg)
+    enable_sa2c = trainer in {"sa2c", "crr"}
     pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -404,6 +407,8 @@ def _worker_main(
         raise ValueError("gridsearch.enable=true is not supported with DDP")
     if model_type == "albert4rec" and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch is not supported for albert4rec")
+    if trainer == "crr" and bool(gs_cfg.get("enable", False)):
+        raise ValueError("gridsearch is not supported for trainer=crr")
     if continue_training and bool(gs_cfg.get("enable", False)):
         raise ValueError("--continue is not supported with gridsearch.enable=true")
     if eval_only:
@@ -607,7 +612,41 @@ def _worker_main(
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
         eval_fn_eff = evaluate_albert4rec_loo
-    elif enable_sa2c:
+    elif trainer == "crr":
+        best_path = train_crr(
+            cfg=cfg,
+            train_ds=train_ds,
+            val_dl=val_dl,
+            run_dir=run_dir,
+            device=device,
+            reward_click=reward_click,
+            reward_buy=reward_buy,
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+            num_epochs=num_epochs,
+            num_batches=num_batches,
+            train_batch_size=train_batch_size,
+            train_num_workers=train_num_workers,
+            pin_memory=pin_memory,
+            max_steps=max_steps,
+            reward_fn=reward_fn,
+            evaluate_fn=eval_fn,
+        )
+        warmup_path = None
+        best_model = SASRecQNetworkRectools(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            pointwise_critic_use=pointwise_critic_use,
+            pointwise_critic_arch=pointwise_critic_arch,
+            pointwise_critic_mlp=pointwise_mlp_cfg,
+        ).to(device)
+        best_model.load_state_dict(torch.load(best_path, map_location=device))
+    elif trainer == "sa2c":
         best_path, warmup_path = train_sa2c(
             cfg=cfg,
             train_ds=train_ds,

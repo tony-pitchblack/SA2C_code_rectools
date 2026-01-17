@@ -1,0 +1,46 @@
+seed: 0
+dataset: retailrocket
+data: data
+epoch: 80
+
+trainer: crr
+enable_sa2c: true
+
+purchase_only: false
+
+batch_size_train: 600
+batch_size_val: 128
+num_workers_train: 4
+num_workers_val: 0
+device_id: cuda:0
+
+hidden_factor: 64
+num_heads: 1
+num_blocks: 1
+dropout_rate: 0.1
+
+r_click: 0.2
+r_buy: 1.0
+reward_fn: click_buy
+
+lr: 0.005
+max_steps: 0
+debug: false
+
+early_stopping_ep: 10
+early_stopping_metric: ndcg@10
+
+pointwise_critic:
+  use: true
+  arch: mlp
+  mlp:
+    hidden_sizes: [64]
+    dropout_rate: 0.0
+
+crr:
+  temperature: 1.0
+  weight_type: exp
+  advantage_baseline: max
+  tau: 0.005
+  critic_loss_weight: 1.0
+  gamma: 0.5

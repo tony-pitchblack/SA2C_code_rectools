@@ -7,6 +7,7 @@ import yaml
 def default_config() -> dict:
     return {
         "model_type": "sasrec",
+        "trainer": None,
         "gridsearch": {
             "enable": False,
             "metric": "overall.ndcg@10",
@@ -30,6 +31,14 @@ def default_config() -> dict:
         "purchase_only": False,
         "reward_fn": "click_buy",
         "enable_sa2c": True,
+        "crr": {
+            "temperature": 1.0,
+            "weight_type": "exp",
+            "advantage_baseline": "max",
+            "tau": 0.005,
+            "critic_loss_weight": 1.0,
+            "gamma": 0.5,
+        },
         "warmup_epochs": 0.02,
         "early_stopping_warmup_ep": None,
         "batch_size_train": 256,
@@ -236,6 +245,17 @@ def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
     return use, arch, {"hidden_sizes": [int(x) for x in hidden_sizes], "dropout_rate": float(dropout_rate_f)}
 
 
+def resolve_trainer(cfg: dict) -> str:
+    raw = cfg.get("trainer", None)
+    if raw is None:
+        enable_sa2c = bool(cfg.get("enable_sa2c", True))
+        return "sa2c" if enable_sa2c else "baseline"
+    s = str(raw).strip().lower()
+    if s not in {"baseline", "sa2c", "crr"}:
+        raise ValueError("trainer must be one of: baseline | sa2c | crr | null")
+    return s
+
+
 __all__ = [
     "default_config",
     "load_config",
@@ -244,5 +264,6 @@ __all__ = [
     "validate_pointwise_critic_cfg",
     "resolve_ce_sampling",
     "resolve_num_val_negative_samples",
+    "resolve_trainer",
 ]
 

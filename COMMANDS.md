@@ -59,6 +59,7 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/sampled_loss_pointwise_critic.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/crr.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_auto_warmup.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_from_pretrained_auto_warmup.yml
@@ -82,6 +83,7 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/sampled_loss_pointwise_critic_mlp.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/crr.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_auto_warmup.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_from_pretrained_auto_warmup.yml
@@ -137,6 +139,7 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 
 # bert4rec_eval/
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/crr.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_approx_hparams.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/baseline_chunks-pct=0.1.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/bert4rec_eval/default.yml
