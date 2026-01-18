@@ -154,6 +154,7 @@ def ensure_mapped_parquet_cache(
     item2id: dict[int, int] = {}
     counts_list: list[int] = []
     raw_by_idx: list[int] = []
+    is_plu_by_idx: list[bool] = []
     t0 = time.perf_counter()
     for part_path in tqdm(source_files, desc="persrec_tc5 map parquet", unit="part", dynamic_ncols=True, leave=False):
         df_part = pd.read_parquet(str(part_path))
@@ -173,6 +174,7 @@ def ensure_mapped_parquet_cache(
                     item2id[raw] = idx
                     counts_list.append(0)
                     raw_by_idx.append(int(raw))
+                    is_plu_by_idx.append(int(raw) >= 0)
                 out.append(int(idx))
                 counts_list[int(idx)] += 1
             mapped_seqs.append(out)
@@ -180,7 +182,7 @@ def ensure_mapped_parquet_cache(
         df_part[product_column] = mapped_seqs
         df_part.to_parquet(str(mapped_parquet_dir / part_path.name), index=False)
 
-    plu_idxs = np.asarray([i for i, raw in enumerate(raw_by_idx) if int(raw) >= 0], dtype=np.int64)
+    plu_idxs = np.nonzero(np.asarray(is_plu_by_idx, dtype=np.bool_))[0].astype(np.int64)
     np.savez(str(mapped_meta_path), counts=np.asarray(counts_list, dtype=np.int64), plu_idxs=plu_idxs)
     logger.info(
         "persrec_tc5: mapped parquet built parts=%d items=%d in %.3fs (%s)",
