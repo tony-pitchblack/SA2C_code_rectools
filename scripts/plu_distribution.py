@@ -6,8 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-from tqdm.auto import tqdm
+
+
+def _is_plu_id(x: int) -> bool:
+    return int(x) >= 0
 
 
 def _pct(part: int, total: int) -> float:
@@ -73,13 +75,13 @@ def main() -> None:
 
     logger.info("count_tokens_start")
     total_tokens = int(ex.shape[0])
-    is_plu = ex.ge(0)
+    is_plu = ex.map(_is_plu_id)
     total_plu_tokens = int(is_plu.sum())
     total_non_plu_tokens = int(total_tokens - total_plu_tokens)
 
     uniq = ex.unique()
     uniq_total = int(uniq.size)
-    uniq_plu_total = int((uniq >= 0).sum())
+    uniq_plu_total = int((uniq.astype(np.int64, copy=False) >= 0).sum())
     uniq_non_plu_total = int(uniq_total - uniq_plu_total)
     logger.info("count_tokens_done total_tokens=%d unique_tokens=%d", int(total_tokens), int(uniq_total))
 
