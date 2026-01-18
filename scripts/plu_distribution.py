@@ -81,7 +81,7 @@ def main() -> None:
     if not (pa.types.is_list(col_type) or pa.types.is_large_list(col_type)):
         raise TypeError(
             f"Expected {product_column!r} to be a list column, got {col_type}. "
-            "Re-export the parquet with a list<int> column (not a comma-separated string)."
+            "Expected list<int> or list<string> where elements are numeric strings."
         )
 
     for batch in scanner.to_batches():
@@ -98,11 +98,12 @@ def main() -> None:
 
         flat = pc.list_flatten(col)
         if len(flat) > 0:
-            flat_np = np.asarray(flat.to_numpy(zero_copy_only=False), dtype=np.int64)
+            flat_i64 = pc.cast(flat, pa.int64(), safe=False)
+            flat_np = np.asarray(flat_i64.to_numpy(zero_copy_only=False), dtype=np.int64)
             is_plu_flat = flat_np >= 0
             total_plu_tokens += int(is_plu_flat.sum())
 
-            uniq_batch = pc.unique(flat)
+            uniq_batch = pc.unique(flat_i64)
             uniq_set.update(int(x.as_py()) for x in uniq_batch)
 
             offsets = np.asarray(col.offsets.to_numpy(zero_copy_only=False), dtype=np.int64)
