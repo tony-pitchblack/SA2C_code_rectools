@@ -7,7 +7,7 @@ warmup_epochs: 1
 purchase_only: true
 reward_fn: ndcg
 
-batch_size_train: 128
+batch_size_train: 1200
 batch_size_val: 256
 num_workers_train: 4
 num_workers_val: 0
