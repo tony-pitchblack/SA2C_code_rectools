@@ -8,7 +8,7 @@ def parse_args():
         "--continue",
         dest="continue_training",
         action="store_true",
-        help="Continue SA2C training from run_dir checkpoints (best_model.pt => phase2, best_model_warmup.pt => phase1).",
+        help="Continue training from run_dir checkpoints (SA2C: best_model.pt => phase2, best_model_warmup.pt => phase1; baseline: best_model.pt).",
     )
     parser.add_argument(
         "--eval-only",
@@ -23,6 +23,20 @@ def parse_args():
     parser.add_argument("--early_stopping_ep", type=int, default=None, help="Patience epochs for early stopping.")
     parser.add_argument("--early_stopping_metric", type=str, default=None, help="Early stopping metric (ndcg@10).")
     parser.add_argument("--max_steps", type=int, default=None, help="If set, stop after this many update steps.")
+    parser.add_argument(
+        "--batch-size-pct",
+        dest="batch_size_pct",
+        type=float,
+        default=None,
+        help="Scale batch_size_train and batch_size_val from config by this factor (>0).",
+    )
+    parser.add_argument(
+        "--plu-filter",
+        dest="plu_filter",
+        choices=("enable", "disable", "inverse"),
+        default=argparse.SUPPRESS,
+        help="persrec_tc5 only: enable (default), disable, inverse.",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging and NaN checks (overrides config).")
     parser.add_argument(
         "--smoke-cpu",

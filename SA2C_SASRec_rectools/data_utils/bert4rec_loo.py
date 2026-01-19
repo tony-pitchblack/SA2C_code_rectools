@@ -8,6 +8,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from ..distributed import barrier, is_distributed, is_rank0
 from .persrec_tc5 import (
     ensure_data_statis,
     ensure_local_parquet_cache,
@@ -29,9 +30,19 @@ def load_or_build_bert4rec_splits(
     splits_path: Path,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     splits_path = Path(splits_path)
-    if splits_path.exists():
-        z = np.load(str(splits_path))
-        return z["train_idx"], z["val_idx"], z["test_idx"]
+    if is_distributed():
+        if not is_rank0():
+            barrier()
+            z = np.load(str(splits_path))
+            return z["train_idx"], z["val_idx"], z["test_idx"]
+        if splits_path.exists():
+            z = np.load(str(splits_path))
+            barrier()
+            return z["train_idx"], z["val_idx"], z["test_idx"]
+    else:
+        if splits_path.exists():
+            z = np.load(str(splits_path))
+            return z["train_idx"], z["val_idx"], z["test_idx"]
 
     n_rows = int(n_rows)
     eligible_val_idx = np.asarray(eligible_val_idx, dtype=np.int64)
@@ -70,6 +81,8 @@ def load_or_build_bert4rec_splits(
 
     splits_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(str(splits_path), train_idx=train_idx, val_idx=val_idx, test_idx=test_idx)
+    if is_distributed():
+        barrier()
     return train_idx, val_idx, test_idx
 
 
@@ -123,6 +136,7 @@ def prepare_persrec_tc5_bert4rec_loo(
     seed: int,
     val_samples_num: int,
     test_samples_num: int,
+    plu_filter: str,
     limit_chunks_pct: float | None = None,
 ) -> tuple[str, Path, Path, Dataset, Dataset, Dataset]:
     use_sanity_subset = bool(dataset_cfg.get("use_sanity_subset", False))
@@ -189,22 +203,41 @@ def prepare_persrec_tc5_bert4rec_loo(
     ensure_data_statis(data_statis_path, state_size=int(state_size_cfg), item_num=int(counts.shape[0]))
     ensure_pop_dict(pop_dict_path, counts=np.asarray(counts, dtype=np.int64))
 
-    if plu_idxs is None:
-        raise RuntimeError(f"Missing `plu_idxs` in mapped meta: {str(mapped_meta_path)}")
-    plu_set = set(int(x) for x in np.asarray(plu_idxs, dtype=np.int64).tolist())
+    mode = str(plu_filter).strip().lower()
+    if mode not in {"enable", "disable", "inverse"}:
+        raise ValueError("plu_filter must be one of: enable | disable | inverse")
 
-    eligible_test = np.asarray(
-        [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-1]) in plu_set)],
-        dtype=np.int64,
-    )
-    eligible_val = np.asarray(
-        [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-2]) in plu_set)],
-        dtype=np.int64,
-    )
+    if mode == "disable":
+        eligible = np.asarray([i for i, s in enumerate(seqs) if (len(s) >= 3)], dtype=np.int64)
+        eligible_test = eligible
+        eligible_val = eligible
+        splits_dir = "bert4rec_eval"
+    else:
+        if plu_idxs is None:
+            raise RuntimeError(f"Missing `plu_idxs` in mapped meta: {str(mapped_meta_path)}")
+        plu_set = set(int(x) for x in np.asarray(plu_idxs, dtype=np.int64).tolist())
+        if mode == "enable":
+            eligible_test = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-1]) in plu_set)],
+                dtype=np.int64,
+            )
+            eligible_val = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-2]) in plu_set)],
+                dtype=np.int64,
+            )
+            splits_dir = "bert4rec_eval_plu"
+        else:
+            eligible_test = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-1]) not in plu_set)],
+                dtype=np.int64,
+            )
+            eligible_val = np.asarray(
+                [i for i, s in enumerate(seqs) if (len(s) >= 3 and int(s[-2]) not in plu_set)],
+                dtype=np.int64,
+            )
+            splits_dir = "bert4rec_eval_nonplu"
 
-    splits_path = base_dir / "bert4rec_eval_plu" / (
-        "dataset_splits_sanity.npz" if use_sanity_subset else "dataset_splits.npz"
-    )
+    splits_path = base_dir / str(splits_dir) / ("dataset_splits_sanity.npz" if use_sanity_subset else "dataset_splits.npz")
     train_idx, val_idx, test_idx = load_or_build_bert4rec_splits(
         n_rows=int(len(seqs)),
         eligible_val_idx=eligible_val,

@@ -23,6 +23,25 @@ class PointwiseCriticMLP(nn.Module):
         return self.net(x)
 
 
+class StateMLP(nn.Module):
+    def __init__(self, dim: int, hidden_sizes: list[int], dropout_rate: float):
+        super().__init__()
+        if not isinstance(hidden_sizes, list) or len(hidden_sizes) == 0:
+            raise ValueError("hidden_sizes must be a non-empty list[int]")
+        dims = [int(dim)] + [int(x) for x in hidden_sizes] + [int(dim)]
+        layers: list[nn.Module] = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(nn.ReLU())
+                if float(dropout_rate) > 0:
+                    layers.append(nn.Dropout(float(dropout_rate)))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class PointWiseFeedForward(nn.Module):
     def __init__(self, n_factors: int, n_factors_ff: int, dropout_rate: float):
         super().__init__()
@@ -116,6 +135,10 @@ class SASRecQNetworkRectools(nn.Module):
         pointwise_critic_use: bool = False,
         pointwise_critic_arch: str = "dot",
         pointwise_critic_mlp: dict | None = None,
+        actor_lstm: dict | None = None,
+        actor_mlp: dict | None = None,
+        critic_lstm: dict | None = None,
+        critic_mlp: dict | None = None,
     ):
         super().__init__()
         self.item_num = int(item_num)
@@ -133,7 +156,55 @@ class SASRecQNetworkRectools(nn.Module):
             dropout_rate=float(dropout_rate),
         )
 
-        self.head_q = nn.Linear(self.hidden_size, self.item_num + 1)
+        self.actor_lstm = None
+        self.actor_mlp = None
+        if actor_lstm is not None:
+            cfg = dict(actor_lstm)
+            hs = int(cfg.get("hidden_size"))
+            nl = int(cfg.get("num_layers"))
+            dr = float(cfg.get("dropout_rate"))
+            if hs != int(self.hidden_size):
+                raise ValueError("actor.lstm.hidden_size must equal hidden_size (actor head uses dot-product)")
+            self.actor_lstm = nn.LSTM(
+                input_size=int(self.hidden_size),
+                hidden_size=int(hs),
+                num_layers=int(nl),
+                dropout=(float(dr) if int(nl) > 1 else 0.0),
+                batch_first=True,
+            )
+        if actor_mlp is not None:
+            cfg = dict(actor_mlp)
+            self.actor_mlp = StateMLP(
+                dim=int(self.hidden_size),
+                hidden_sizes=list(cfg.get("hidden_sizes", [])),
+                dropout_rate=float(cfg.get("dropout_rate", 0.0)),
+            )
+
+        self.critic_lstm = None
+        self.critic_mlp = None
+        critic_dim = int(self.hidden_size)
+        if critic_lstm is not None:
+            cfg = dict(critic_lstm)
+            hs = int(cfg.get("hidden_size"))
+            nl = int(cfg.get("num_layers"))
+            dr = float(cfg.get("dropout_rate"))
+            self.critic_lstm = nn.LSTM(
+                input_size=int(self.hidden_size),
+                hidden_size=int(hs),
+                num_layers=int(nl),
+                dropout=(float(dr) if int(nl) > 1 else 0.0),
+                batch_first=True,
+            )
+            critic_dim = int(hs)
+        if critic_mlp is not None:
+            cfg = dict(critic_mlp)
+            self.critic_mlp = StateMLP(
+                dim=int(critic_dim),
+                hidden_sizes=list(cfg.get("hidden_sizes", [])),
+                dropout_rate=float(cfg.get("dropout_rate", 0.0)),
+            )
+
+        self.head_q = nn.Linear(int(critic_dim), self.item_num + 1)
 
         self.pointwise_critic_use = bool(pointwise_critic_use)
         self.pointwise_critic_arch = str(pointwise_critic_arch)
@@ -158,6 +229,34 @@ class SASRecQNetworkRectools(nn.Module):
         causal = torch.ones(self.state_size, self.state_size, dtype=torch.bool).triu(1)
         self.register_buffer("causal_attn_mask", causal, persistent=False)
 
+    def _apply_optional_lstm(self, seqs: torch.Tensor, inputs: torch.Tensor, lstm: nn.LSTM) -> torch.Tensor:
+        bsz, seqlen, _ = seqs.shape
+        if inputs.shape[:2] != (bsz, seqlen):
+            raise ValueError("inputs/seqs batch mismatch")
+        lengths = inputs.ne(self.pad_id).sum(dim=1).to(torch.long)
+        lengths_clamped = lengths.clamp(min=1).to("cpu")
+        packed = nn.utils.rnn.pack_padded_sequence(seqs, lengths_clamped, batch_first=True, enforce_sorted=False)
+        out_packed, _ = lstm(packed)
+        out, _ = nn.utils.rnn.pad_packed_sequence(out_packed, batch_first=True, total_length=seqlen)
+        mask = inputs.ne(self.pad_id).unsqueeze(-1).to(out.dtype)
+        return out * mask
+
+    def actor_seq(self, inputs: torch.Tensor) -> torch.Tensor:
+        seqs = self.encode_seq(inputs)
+        if self.actor_lstm is not None:
+            seqs = self._apply_optional_lstm(seqs, inputs, self.actor_lstm)
+        if self.actor_mlp is not None:
+            seqs = self.actor_mlp(seqs)
+        return seqs
+
+    def critic_seq(self, inputs: torch.Tensor) -> torch.Tensor:
+        seqs = self.encode_seq(inputs)
+        if self.critic_lstm is not None:
+            seqs = self._apply_optional_lstm(seqs, inputs, self.critic_lstm)
+        if self.critic_mlp is not None:
+            seqs = self.critic_mlp(seqs)
+        return seqs
+
     def forward(
         self,
         inputs: torch.Tensor,
@@ -173,37 +272,57 @@ class SASRecQNetworkRectools(nn.Module):
         if seqlen != self.state_size:
             raise ValueError(f"Expected inputs shape [B,{self.state_size}], got {tuple(inputs.shape)}")
 
-        seqs = self.encode_seq(inputs)
+        _ = len_state
+        seqs_actor = self.actor_seq(inputs)
+        seqs_critic = None if self.pointwise_critic_use else self.critic_seq(inputs)
 
         if valid_mask is not None or crit_cands is not None:
             if valid_mask is None or crit_cands is None:
                 raise ValueError("candidate-scoring forward requires valid_mask and crit_cands")
-            seqs_next = torch.zeros_like(seqs)
-            seqs_next[:, :-1, :] = seqs[:, 1:, :]
-            seqs_curr_flat = seqs[valid_mask]
-            seqs_next_flat = seqs_next[valid_mask]
+            seqs_actor_next = torch.zeros_like(seqs_actor)
+            seqs_actor_next[:, :-1, :] = seqs_actor[:, 1:, :]
+            seqs_actor_curr_flat = seqs_actor[valid_mask]
+            seqs_actor_next_flat = seqs_actor_next[valid_mask]
 
-            q_curr_c = self.score_q_candidates(seqs_curr_flat, crit_cands)
-            q_next_c = self.score_q_candidates(seqs_next_flat, crit_cands)
+            if self.pointwise_critic_use:
+                seqs_critic_pw = self.critic_seq(inputs)
+                if int(seqs_critic_pw.shape[-1]) != int(self.hidden_size):
+                    raise ValueError("pointwise critic requires critic hidden_size == hidden_size")
+                seqs_critic_next = torch.zeros_like(seqs_critic_pw)
+                seqs_critic_next[:, :-1, :] = seqs_critic_pw[:, 1:, :]
+                seqs_critic_curr_flat = seqs_critic_pw[valid_mask]
+                seqs_critic_next_flat = seqs_critic_next[valid_mask]
+            else:
+                if seqs_critic is None:
+                    raise RuntimeError("critic_seq is not computed")
+                seqs_critic_next = torch.zeros_like(seqs_critic)
+                seqs_critic_next[:, :-1, :] = seqs_critic[:, 1:, :]
+                seqs_critic_curr_flat = seqs_critic[valid_mask]
+                seqs_critic_next_flat = seqs_critic_next[valid_mask]
+
+            q_curr_c = self.score_q_candidates(seqs_critic_curr_flat, crit_cands)
+            q_next_c = self.score_q_candidates(seqs_critic_next_flat, crit_cands)
 
             ce_logits = None
             if ce_cands is not None:
-                ce_logits = self.score_ce_candidates(seqs_curr_flat, ce_cands)
+                ce_logits = self.score_ce_candidates(seqs_actor_curr_flat, ce_cands)
             elif bool(return_full_ce):
-                ce_full_seq = seqs @ self.item_emb.weight.t()
+                ce_full_seq = seqs_actor @ self.item_emb.weight.t()
                 ce_full_seq[:, :, self.pad_id] = float("-inf")
                 ce_logits = ce_full_seq[valid_mask]
 
             ce_next_logits = None
             if ce_next_cands is not None:
-                ce_next_logits = self.score_ce_candidates(seqs_next_flat, ce_next_cands)
-            return seqs, q_curr_c, q_next_c, ce_logits, ce_next_logits
+                ce_next_logits = self.score_ce_candidates(seqs_actor_next_flat, ce_next_cands)
+            return seqs_actor, q_curr_c, q_next_c, ce_logits, ce_next_logits
 
-        ce_logits_seq = seqs @ self.item_emb.weight.t()
+        ce_logits_seq = seqs_actor @ self.item_emb.weight.t()
         ce_logits_seq[:, :, self.pad_id] = float("-inf")
         if self.pointwise_critic_use:
             return ce_logits_seq
-        q_values_seq = self.head_q(seqs)
+        if seqs_critic is None:
+            raise RuntimeError("critic_seq is not computed")
+        q_values_seq = self.head_q(seqs_critic)
         q_values_seq[:, :, self.pad_id] = float("-inf")
         return q_values_seq, ce_logits_seq
 
@@ -214,10 +333,21 @@ class SASRecQNetworkRectools(nn.Module):
         for m in self.backbone_modules():
             yield from m.parameters()
 
+    def actor_parameters(self):
+        yield from self.backbone_parameters()
+        if self.actor_lstm is not None:
+            yield from self.actor_lstm.parameters()
+        if self.actor_mlp is not None:
+            yield from self.actor_mlp.parameters()
+
     def critic_parameters(self):
         yield from self.head_q.parameters()
         if self.pointwise_critic_mlp is not None:
             yield from self.pointwise_critic_mlp.parameters()
+        if self.critic_lstm is not None:
+            yield from self.critic_lstm.parameters()
+        if self.critic_mlp is not None:
+            yield from self.critic_mlp.parameters()
 
     def set_backbone_requires_grad(self, requires_grad: bool) -> None:
         for p in self.backbone_parameters():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import shutil
 import time
 from pathlib import Path
 
@@ -19,6 +20,9 @@ from .config import (
     load_config,
     resolve_ce_sampling,
     resolve_num_val_negative_samples,
+    resolve_trainer,
+    validate_crr_actor_cfg,
+    validate_crr_critic_cfg,
     validate_pointwise_critic_cfg,
 )
 from .data_utils.bert4rec_loo import prepare_persrec_tc5_bert4rec_loo, prepare_sessions_bert4rec_loo
@@ -42,6 +46,7 @@ from .metrics import evaluate, evaluate_albert4rec_loo, evaluate_loo, evaluate_l
 from .gridsearch import run_optuna_gridsearch
 from .training.albert4rec import train_albert4rec
 from .training.baseline import train_baseline
+from .training.crr import train_crr
 from .training.sa2c import train_sa2c
 
 
@@ -83,6 +88,9 @@ def _worker_main(
 ) -> None:
     silence_logging_if_needed(is_rank0=is_rank0())
     eval_only = bool(getattr(args, "eval_only", False))
+    if bool(eval_only) and is_distributed() and (not is_rank0()):
+        barrier()
+        return
     continue_training = bool(getattr(args, "continue_training", False))
     config_path = args.config
 
@@ -95,12 +103,34 @@ def _worker_main(
     reward_fn = str(cfg.get("reward_fn", "click_buy"))
     if reward_fn not in {"click_buy", "ndcg"}:
         raise ValueError("reward_fn must be one of: click_buy | ndcg")
-    enable_sa2c = bool(cfg.get("enable_sa2c", True))
-    pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
+    trainer = resolve_trainer(cfg)
+    enable_sa2c = trainer in {"sa2c", "crr"}
+    pointwise_critic_use = False
+    pointwise_critic_arch = "dot"
+    pointwise_mlp_cfg = None
+    actor_lstm_cfg = None
+    actor_mlp_cfg = None
+    critic_lstm_cfg = None
+    critic_mlp_cfg = None
+    if trainer == "crr":
+        actor_lstm_cfg, actor_mlp_cfg = validate_crr_actor_cfg(cfg)
+        critic_type, critic_lstm_cfg, critic_mlp_cfg = validate_crr_critic_cfg(cfg)
+        pointwise_critic_use = str(critic_type) == "pointwise"
+        pointwise_critic_arch = "dot"
+        pointwise_mlp_cfg = None
+    elif trainer == "sa2c":
+        pointwise_critic_use, pointwise_critic_arch, pointwise_mlp_cfg = validate_pointwise_critic_cfg(cfg)
 
     repo_root = Path(__file__).resolve().parent.parent
     dataset_cfg = cfg.get("dataset", "retailrocket")
     persrec_tc5 = is_persrec_tc5_dataset_cfg(dataset_cfg)
+    plu_filter_raw = getattr(args, "plu_filter", None)
+    if persrec_tc5:
+        plu_filter_mode = "enable" if plu_filter_raw is None else str(plu_filter_raw)
+    else:
+        if plu_filter_raw is not None:
+            raise ValueError("--plu-filter is supported only for persrec_tc5 datasets")
+        plu_filter_mode = None
     if persrec_tc5:
         calc_date = str(dataset_cfg.get("calc_date"))
         dataset_name = f"persrec_tc5_{calc_date}"
@@ -109,10 +139,22 @@ def _worker_main(
         dataset_name = str(dataset_cfg)
         dataset_root = resolve_dataset_root(dataset_name)
 
-    config_name = Path(config_path).stem
-    if bool(getattr(args, "sanity", False)):
-        config_name = f"{config_name}_sanity"
+    config_p = Path(config_path).resolve()
+    logs_root = (repo_root / "logs" / "SA2C_SASRec_rectools").resolve()
+    use_run_dir_from_config = (
+        (eval_only or continue_training)
+        and config_p.name in {"config.yml", "config.yaml"}
+        and logs_root in config_p.parents
+    )
+    if use_run_dir_from_config:
+        config_name = config_p.parent.name
+    else:
+        config_name = Path(config_path).stem
+        if bool(getattr(args, "sanity", False)):
+            config_name = f"{config_name}_sanity"
     eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
+    if persrec_tc5 and eval_scheme == "bert4rec_eval" and plu_filter_mode in {"disable", "inverse"}:
+        eval_scheme = f"bert4rec_eval_plu-{'disable' if plu_filter_mode == 'disable' else 'inverse'}"
     run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
 
     pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
@@ -150,6 +192,12 @@ def _worker_main(
     logger = logging.getLogger(__name__)
     logger.info("run_dir: %s", str(run_dir))
     logger.info("dataset: %s", dataset_name)
+    if bool(continue_training) and is_rank0():
+        logger.info(
+            "continue: enabled; will resume SA2C from run_dir checkpoints if present (expected: %s, %s)",
+            str(run_dir / "best_model.pt"),
+            str(run_dir / "best_model_warmup.pt"),
+        )
     if bool(getattr(args, "smoke_cpu", False)):
         logger.info("smoke_cpu: enabled (forcing CPU, batch_size=8, epoch=1, skipping val/test result file writing)")
 
@@ -224,6 +272,7 @@ def _worker_main(
                 seed=int(cfg.get("seed", 0)),
                 val_samples_num=int(val_split_samples_num),
                 test_samples_num=int(test_split_samples_num),
+                plu_filter=str(plu_filter_mode),
                 limit_chunks_pct=limit_chunks_pct,
             )
         else:
@@ -404,13 +453,23 @@ def _worker_main(
         raise ValueError("gridsearch.enable=true is not supported with DDP")
     if model_type == "albert4rec" and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch is not supported for albert4rec")
+    if trainer == "crr" and bool(gs_cfg.get("enable", False)):
+        raise ValueError("gridsearch is not supported for trainer=crr")
     if continue_training and bool(gs_cfg.get("enable", False)):
         raise ValueError("--continue is not supported with gridsearch.enable=true")
     if eval_only:
         if is_distributed() and (not is_rank0()):
             barrier()
             return
-        best_path = run_dir / "best_model.pt"
+        ckpt_run_dir = run_dir
+        if persrec_tc5 and eval_scheme in {"bert4rec_eval_plu-disable", "bert4rec_eval_plu-inverse"}:
+            ckpt_run_dir = make_run_dir(dataset_name, config_name, eval_scheme="bert4rec_eval")
+            for fname in ("best_model.pt", "best_model_warmup.pt", "config.yml"):
+                src = ckpt_run_dir / fname
+                if src.exists():
+                    shutil.copy2(str(src), str(run_dir / fname))
+
+        best_path = ckpt_run_dir / "best_model.pt"
         if not best_path.exists():
             raise FileNotFoundError(f"Missing checkpoint: {best_path}")
 
@@ -442,6 +501,10 @@ def _worker_main(
                     pointwise_critic_use=pointwise_critic_use,
                     pointwise_critic_arch=pointwise_critic_arch,
                     pointwise_critic_mlp=pointwise_mlp_cfg,
+                    actor_lstm=actor_lstm_cfg,
+                    actor_mlp=actor_mlp_cfg,
+                    critic_lstm=critic_lstm_cfg,
+                    critic_mlp=critic_mlp_cfg,
                 ).to(device)
             else:
                 best_model = SASRecBaselineRectools(
@@ -489,9 +552,9 @@ def _worker_main(
         val_warmup = None
         test_warmup = None
         if enable_sa2c and model_type != "albert4rec":
-            warmup_path = run_dir / "best_model_warmup.pt"
+            warmup_path = ckpt_run_dir / "best_model_warmup.pt"
             if not warmup_path.exists():
-                warmup_path = run_dir / "best_warmup_model.pt"
+                warmup_path = ckpt_run_dir / "best_warmup_model.pt"
             if warmup_path.exists():
                 warmup_model = SASRecQNetworkRectools(
                     item_num=item_num,
@@ -503,6 +566,10 @@ def _worker_main(
                     pointwise_critic_use=pointwise_critic_use,
                     pointwise_critic_arch=pointwise_critic_arch,
                     pointwise_critic_mlp=pointwise_mlp_cfg,
+                    actor_lstm=actor_lstm_cfg,
+                    actor_mlp=actor_mlp_cfg,
+                    critic_lstm=critic_lstm_cfg,
+                    critic_mlp=critic_mlp_cfg,
                 ).to(device)
                 warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
                 val_warmup = eval_fn(
@@ -536,14 +603,15 @@ def _worker_main(
                     ce_vocab_pct=ce_vocab_pct,
                 )
 
-        write_results(
-            run_dir=run_dir,
-            val_best=val_best,
-            test_best=test_best,
-            val_warmup=val_warmup,
-            test_warmup=test_warmup,
-            smoke_cpu=smoke_cpu,
-        )
+        if is_rank0():
+            write_results(
+                run_dir=run_dir,
+                val_best=val_best,
+                test_best=test_best,
+                val_warmup=val_warmup,
+                test_warmup=test_warmup,
+                smoke_cpu=smoke_cpu,
+            )
         if is_distributed():
             barrier()
         return
@@ -595,6 +663,8 @@ def _worker_main(
             pin_memory=pin_memory,
             max_steps=max_steps,
         )
+        if is_distributed():
+            barrier()
         warmup_path = None
         best_model = Albert4Rec(
             item_num=item_num,
@@ -607,7 +677,47 @@ def _worker_main(
         ).to(device)
         best_model.load_state_dict(torch.load(best_path, map_location=device))
         eval_fn_eff = evaluate_albert4rec_loo
-    elif enable_sa2c:
+    elif trainer == "crr":
+        best_path = train_crr(
+            cfg=cfg,
+            train_ds=train_ds,
+            val_dl=val_dl,
+            run_dir=run_dir,
+            device=device,
+            reward_click=reward_click,
+            reward_buy=reward_buy,
+            state_size=state_size,
+            item_num=item_num,
+            purchase_only=purchase_only,
+            num_epochs=num_epochs,
+            num_batches=num_batches,
+            train_batch_size=train_batch_size,
+            train_num_workers=train_num_workers,
+            pin_memory=pin_memory,
+            max_steps=max_steps,
+            reward_fn=reward_fn,
+            evaluate_fn=eval_fn,
+        )
+        if is_distributed():
+            barrier()
+        warmup_path = None
+        best_model = SASRecQNetworkRectools(
+            item_num=item_num,
+            state_size=state_size,
+            hidden_size=int(cfg.get("hidden_factor", 64)),
+            num_heads=int(cfg.get("num_heads", 1)),
+            num_blocks=int(cfg.get("num_blocks", 1)),
+            dropout_rate=float(cfg.get("dropout_rate", 0.1)),
+            pointwise_critic_use=pointwise_critic_use,
+            pointwise_critic_arch=pointwise_critic_arch,
+            pointwise_critic_mlp=pointwise_mlp_cfg,
+            actor_lstm=actor_lstm_cfg,
+            actor_mlp=actor_mlp_cfg,
+            critic_lstm=critic_lstm_cfg,
+            critic_mlp=critic_mlp_cfg,
+        ).to(device)
+        best_model.load_state_dict(torch.load(best_path, map_location=device))
+    elif trainer == "sa2c":
         best_path, warmup_path = train_sa2c(
             cfg=cfg,
             train_ds=train_ds,
@@ -634,6 +744,8 @@ def _worker_main(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
         )
+        if is_distributed():
+            barrier()
         best_model = SASRecQNetworkRectools(
             item_num=item_num,
             state_size=state_size,
@@ -668,7 +780,10 @@ def _worker_main(
             ce_loss_vocab_size=ce_loss_vocab_size,
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
+            continue_training=continue_training,
         )
+        if is_distributed():
+            barrier()
         warmup_path = None
         best_model = SASRecBaselineRectools(
             item_num=item_num,
@@ -732,6 +847,10 @@ def _worker_main(
             pointwise_critic_use=pointwise_critic_use,
             pointwise_critic_arch=pointwise_critic_arch,
             pointwise_critic_mlp=pointwise_mlp_cfg,
+            actor_lstm=actor_lstm_cfg,
+            actor_mlp=actor_mlp_cfg,
+            critic_lstm=critic_lstm_cfg,
+            critic_mlp=critic_mlp_cfg,
         ).to(device)
         warmup_model.load_state_dict(torch.load(warmup_path, map_location=device))
 
@@ -766,14 +885,15 @@ def _worker_main(
             ce_vocab_pct=ce_vocab_pct,
         )
 
-    write_results(
-        run_dir=run_dir,
-        val_best=val_best,
-        test_best=test_best,
-        val_warmup=val_warmup,
-        test_warmup=test_warmup,
-        smoke_cpu=smoke_cpu,
-    )
+    if is_rank0():
+        write_results(
+            run_dir=run_dir,
+            val_best=val_best,
+            test_best=test_best,
+            val_warmup=val_warmup,
+            test_warmup=test_warmup,
+            smoke_cpu=smoke_cpu,
+        )
     if is_distributed():
         barrier()
 
