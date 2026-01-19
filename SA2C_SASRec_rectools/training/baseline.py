@@ -43,6 +43,7 @@ def train_baseline(
     ce_loss_vocab_size: int | None = None,
     ce_full_vocab_size: int | None = None,
     ce_vocab_pct: float | None = None,
+    continue_training: bool = False,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -58,6 +59,20 @@ def train_baseline(
         num_blocks=int(cfg.get("num_blocks", 1)),
         dropout_rate=float(cfg.get("dropout_rate", 0.1)),
     ).to(device)
+    if bool(continue_training):
+        best_path = run_dir / "best_model.pt"
+        if is_rank0():
+            logger.info("continue(baseline): enabled")
+            logger.info("continue(baseline): run_dir=%s", str(run_dir))
+            logger.info("continue(baseline): probing checkpoint=%s", str(best_path))
+        if not best_path.exists():
+            if is_rank0():
+                logger.info("continue(baseline): checkpoint not found")
+            raise FileNotFoundError(f"--continue requires {best_path.name} in run_dir={str(run_dir)}")
+        state = torch.load(str(best_path), map_location=device)
+        model.load_state_dict(state)
+        if is_rank0():
+            logger.info("continue(baseline): checkpoint loaded successfully")
     if is_distributed():
         local_rank = int(get_local_rank())
         model = DDP(model, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)

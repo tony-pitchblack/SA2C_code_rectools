@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,6 +57,30 @@ def _iter_result_pairs(root: Path):
         yield run_dir, clicks_path, purchase_path
 
 
+def _iter_run_dirs_with_best_model(root: Path):
+    tqdm = _tqdm()
+    ckpt_paths = list(root.rglob("best_model.pt"))
+    for ckpt_path in tqdm(ckpt_paths, desc=f"scan {root.name}", unit="run"):
+        yield ckpt_path.parent
+
+
+def _force_eval_run_dir(*, script_name: str, run_dir: Path) -> None:
+    cfg_path = run_dir / "config.yml"
+    if not cfg_path.exists():
+        cfg_path = run_dir / "config.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Missing config file in run dir: {run_dir}")
+
+    repo_root = _repo_root()
+    if script_name == "SA2C_SASRec_rectools":
+        cmd = [sys.executable, "-m", "SA2C_SASRec_rectools", "--config", str(cfg_path), "--eval-only"]
+    elif script_name == "SA2C_SASRec_torch":
+        cmd = [sys.executable, str(repo_root / "SA2C_SASRec_torch.py"), "--config", str(cfg_path), "--eval-only"]
+    else:
+        raise ValueError(f"Unsupported script: {script_name}")
+    subprocess.run(cmd, cwd=str(repo_root), check=True)
+
+
 def _extract_group_and_config(*, script_name: str, script_root: Path, run_dir: Path):
     rel = run_dir.relative_to(script_root)
     parts = rel.parts
@@ -91,6 +117,12 @@ def _read_test_ndcg_at_10(csv_path: Path) -> float | None:
         return None
 
 
+def _is_purchase_only_config_label(config_label: str) -> bool:
+    s = str(config_label).strip().lower()
+    s = s.replace("-", "_").replace(" ", "_")
+    return "purchase_only" in s
+
+
 def _plot_group(
     *,
     title: str,
@@ -114,7 +146,8 @@ def _plot_group(
     color_map = {"torch": "0.6", "rectools": "C3"}
     rows = list(rows)
 
-    fig_h = max(4.5, 0.35 * max(len(rows), 1) * 2.0 + 1.6)
+    n_cfg = len({str(cfg) for cfg, *_ in rows})
+    fig_h = max(6.0, 0.55 * max(n_cfg, 1) + 4.0)
     fig, axes = plt.subplots(nrows=3, ncols=1, figsize=(12, fig_h), height_ratios=[1.0, 1.0, 0.55])
     if " / " in title:
         ds_title, subtitle = title.split(" / ", 1)
@@ -265,6 +298,7 @@ def _build_plots(
     only_dataset: str | None,
     only_eval_scheme: str | None,
     max_metric_values: list[float] | None,
+    force_eval: bool,
 ):
     tqdm = _tqdm()
     by_group: dict[_GroupKey, dict[str, dict[str, tuple[float, float, float]]]] = {}
@@ -277,6 +311,23 @@ def _build_plots(
             continue
 
         source = "torch" if script_name == "SA2C_SASRec_torch" else "rectools"
+        if force_eval:
+            for run_dir in _iter_run_dirs_with_best_model(script_root):
+                parsed = _extract_group_and_config(script_name=script_name, script_root=script_root, run_dir=run_dir)
+                if parsed is None:
+                    continue
+                group_key, _ = parsed
+                if only_dataset is not None and group_key.dataset_name != only_dataset:
+                    continue
+                if only_eval_scheme is not None and group_key.eval_scheme != only_eval_scheme:
+                    continue
+
+                clicks_path = run_dir / "results_clicks.csv"
+                purchase_path = run_dir / "results_purchase.csv"
+                if clicks_path.exists() and purchase_path.exists():
+                    continue
+                _force_eval_run_dir(script_name=script_name, run_dir=run_dir)
+
         for run_dir, clicks_path, purchase_path in _iter_result_pairs(script_root):
             parsed = _extract_group_and_config(script_name=script_name, script_root=script_root, run_dir=run_dir)
             if parsed is None:
@@ -300,13 +351,15 @@ def _build_plots(
                 cfg_map[str(source)] = (float(clicks), float(purchase), float(mtime))
 
     for group_key, cfg_map in tqdm(list(by_group.items()), desc="plot", unit="dataset"):
-        rows: list[tuple[str, float, float, str]] = []
+        rows_normal: list[tuple[str, float, float, str]] = []
+        rows_purchase_only: list[tuple[str, float, float, str]] = []
         for cfg in sorted(cfg_map.keys()):
+            rows_dst = rows_purchase_only if _is_purchase_only_config_label(cfg) else rows_normal
             for src in ("torch", "rectools"):
                 v = cfg_map.get(cfg, {}).get(src)
                 if v is None:
                     continue
-                rows.append((str(cfg), float(v[0]), float(v[1]), str(src)))
+                rows_dst.append((str(cfg), float(v[0]), float(v[1]), str(src)))
 
         results_root = logs_root.parent / "results"
         plots_root = results_root / "plots"
@@ -318,13 +371,26 @@ def _build_plots(
             out_dir = plots_root / group_key.dataset_name / group_key.eval_scheme
             title = f"{pretty_ds} / {group_key.eval_scheme}"
 
-        _plot_group(
-            title=title,
-            dataset_name=group_key.dataset_name,
-            rows=rows,
-            out_path=out_dir / "test_results.png",
-            max_metric_value=_max_metric_for_dataset(group_key.dataset_name, max_metric_values),
-        )
+        vmax = _max_metric_for_dataset(group_key.dataset_name, max_metric_values)
+        if rows_normal:
+            _plot_group(
+                title=title,
+                dataset_name=group_key.dataset_name,
+                rows=rows_normal,
+                out_path=out_dir / "test_results.png",
+                max_metric_value=vmax,
+            )
+        if rows_purchase_only:
+            po_title = f"{pretty_ds} (purchase only)"
+            if group_key.eval_scheme is not None:
+                po_title = f"{po_title} / {group_key.eval_scheme}"
+            _plot_group(
+                title=po_title,
+                dataset_name=group_key.dataset_name,
+                rows=rows_purchase_only,
+                out_path=out_dir / "test_results_purchase_only.png",
+                max_metric_value=vmax,
+            )
 
 
 def main() -> None:
@@ -332,6 +398,11 @@ def main() -> None:
     p.add_argument("--script", default=None, choices=["SA2C_SASRec_torch", "SA2C_SASRec_rectools"])
     p.add_argument("--dataset", default=None)
     p.add_argument("--eval-scheme", default=None)
+    p.add_argument(
+        "--force-eval",
+        action="store_true",
+        help="Re-evaluate runs with best_model.pt but missing results CSVs before plotting.",
+    )
     p.add_argument(
         "--max-metric-value",
         nargs="*",
@@ -351,6 +422,7 @@ def main() -> None:
         only_dataset=args.dataset,
         only_eval_scheme=args.eval_scheme,
         max_metric_values=args.max_metric_value,
+        force_eval=bool(args.force_eval),
     )
 
 

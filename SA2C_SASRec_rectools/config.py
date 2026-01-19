@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import numpy as np
 import yaml
 
@@ -7,6 +8,7 @@ import yaml
 def default_config() -> dict:
     return {
         "model_type": "sasrec",
+        "trainer": None,
         "gridsearch": {
             "enable": False,
             "metric": "overall.ndcg@10",
@@ -30,6 +32,16 @@ def default_config() -> dict:
         "purchase_only": False,
         "reward_fn": "click_buy",
         "enable_sa2c": True,
+        "crr": {
+            "temperature": 1.0,
+            "weight_type": "exp",
+            "advantage_baseline": "mean",
+            "tau": 0.005,
+            "critic_loss_weight": 1.0,
+            "actor_lr": None,
+            "critic_lr": None,
+            "gamma": 0.5,
+        },
         "warmup_epochs": 0.02,
         "early_stopping_warmup_ep": None,
         "batch_size_train": 256,
@@ -67,6 +79,8 @@ def default_config() -> dict:
             "ce_n_negatives": 256,
             "critic_n_negatives": 256,
         },
+        "actor": {},
+        "critic": {"type": "full-vocab"},
         "pointwise_critic": {
             "use": False,
             "arch": "dot",
@@ -123,6 +137,23 @@ def apply_cli_overrides(cfg: dict, args) -> dict:
         cfg["max_steps"] = int(args.max_steps)
     if bool(args.debug):
         cfg["debug"] = True
+
+    batch_size_pct = getattr(args, "batch_size_pct", None)
+    if batch_size_pct is not None:
+        try:
+            pct = float(batch_size_pct)
+        except Exception as e:
+            raise ValueError("--batch-size-pct must be a float > 0") from e
+        if not (pct > 0.0):
+            raise ValueError("--batch-size-pct must be a float > 0")
+        for k in ("batch_size_train", "batch_size_val"):
+            v = cfg.get(k, None)
+            if v is None:
+                continue
+            n = int(v)
+            if n <= 0:
+                continue
+            cfg[k] = max(1, int(math.floor(float(n) * float(pct))))
     return cfg
 
 
@@ -236,13 +267,94 @@ def validate_pointwise_critic_cfg(cfg: dict) -> tuple[bool, str, dict | None]:
     return use, arch, {"hidden_sizes": [int(x) for x in hidden_sizes], "dropout_rate": float(dropout_rate_f)}
 
 
+def _validate_optional_lstm_block(block, *, prefix: str) -> dict | None:
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError(f"{prefix} must be a mapping (dict) or null")
+    for k in ("hidden_size", "num_layers", "dropout_rate"):
+        if k not in block:
+            raise ValueError(f"Missing required config: {prefix}.{k}")
+    hidden_size = int(block.get("hidden_size"))
+    num_layers = int(block.get("num_layers"))
+    dropout_rate = float(block.get("dropout_rate"))
+    if hidden_size <= 0:
+        raise ValueError(f"{prefix}.hidden_size must be > 0")
+    if num_layers <= 0:
+        raise ValueError(f"{prefix}.num_layers must be > 0")
+    if dropout_rate < 0.0:
+        raise ValueError(f"{prefix}.dropout_rate must be >= 0")
+    return {"hidden_size": hidden_size, "num_layers": num_layers, "dropout_rate": dropout_rate}
+
+
+def _validate_optional_state_mlp_block(block, *, prefix: str) -> dict | None:
+    if block is None:
+        return None
+    if not isinstance(block, dict):
+        raise ValueError(f"{prefix} must be a mapping (dict) or null")
+    if "hidden_sizes" not in block:
+        raise ValueError(f"Missing required config: {prefix}.hidden_sizes")
+    if "dropout_rate" not in block:
+        raise ValueError(f"Missing required config: {prefix}.dropout_rate")
+    hidden_sizes = block.get("hidden_sizes")
+    if not isinstance(hidden_sizes, list) or len(hidden_sizes) == 0 or not all(isinstance(x, int) for x in hidden_sizes):
+        raise ValueError(f"{prefix}.hidden_sizes must be a non-empty list of ints")
+    dropout_rate = float(block.get("dropout_rate"))
+    if dropout_rate < 0.0:
+        raise ValueError(f"{prefix}.dropout_rate must be >= 0")
+    return {"hidden_sizes": [int(x) for x in hidden_sizes], "dropout_rate": float(dropout_rate)}
+
+
+def validate_crr_actor_cfg(cfg: dict) -> tuple[dict | None, dict | None]:
+    actor_cfg = cfg.get("actor") or {}
+    if not isinstance(actor_cfg, dict):
+        raise ValueError("actor must be a mapping (dict)")
+    actor_lstm_cfg = None
+    if "lstm" in actor_cfg:
+        actor_lstm_cfg = _validate_optional_lstm_block(actor_cfg.get("lstm"), prefix="actor.lstm")
+    actor_mlp_cfg = None
+    if "mlp" in actor_cfg:
+        actor_mlp_cfg = _validate_optional_state_mlp_block(actor_cfg.get("mlp"), prefix="actor.mlp")
+    return actor_lstm_cfg, actor_mlp_cfg
+
+
+def validate_crr_critic_cfg(cfg: dict) -> tuple[str, dict | None, dict | None]:
+    critic_cfg = cfg.get("critic") or {}
+    if not isinstance(critic_cfg, dict):
+        raise ValueError("critic must be a mapping (dict)")
+    critic_type = str(critic_cfg.get("type", "full-vocab")).strip().lower()
+    if critic_type not in {"pointwise", "full-vocab"}:
+        raise ValueError("critic.type must be one of: pointwise | full-vocab")
+    critic_lstm_cfg = None
+    if "lstm" in critic_cfg:
+        critic_lstm_cfg = _validate_optional_lstm_block(critic_cfg.get("lstm"), prefix="critic.lstm")
+    critic_mlp_cfg = None
+    if "mlp" in critic_cfg:
+        critic_mlp_cfg = _validate_optional_state_mlp_block(critic_cfg.get("mlp"), prefix="critic.mlp")
+    return critic_type, critic_lstm_cfg, critic_mlp_cfg
+
+
+def resolve_trainer(cfg: dict) -> str:
+    raw = cfg.get("trainer", None)
+    if raw is None:
+        enable_sa2c = bool(cfg.get("enable_sa2c", True))
+        return "sa2c" if enable_sa2c else "baseline"
+    s = str(raw).strip().lower()
+    if s not in {"baseline", "sa2c", "crr"}:
+        raise ValueError("trainer must be one of: baseline | sa2c | crr | null")
+    return s
+
+
 __all__ = [
     "default_config",
     "load_config",
     "apply_cli_overrides",
     "is_persrec_tc5_dataset_cfg",
+    "validate_crr_actor_cfg",
+    "validate_crr_critic_cfg",
     "validate_pointwise_critic_cfg",
     "resolve_ce_sampling",
     "resolve_num_val_negative_samples",
+    "resolve_trainer",
 ]
 
