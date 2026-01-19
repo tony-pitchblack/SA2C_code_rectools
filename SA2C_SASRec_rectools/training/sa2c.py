@@ -227,6 +227,16 @@ def train_sa2c(
     resume_phase2 = False
     resume_phase1 = False
     if bool(continue_training):
+        rank = int(get_local_rank()) if is_distributed() else 0
+        if is_rank0():
+            logger.info("continue: enabled (distributed=%s world_size=%d)", str(bool(is_distributed())), int(world_size))
+            logger.info("continue: run_dir=%s", str(run_dir))
+            logger.info(
+                "continue: probing checkpoints: %s (phase2), %s (phase1), %s (legacy phase1)",
+                str(best_phase2_path),
+                str(best_warmup_path),
+                str(legacy_warmup_path),
+            )
         if best_phase2_path.exists():
             resume_phase2 = True
             ckpt_path = best_phase2_path
@@ -234,12 +244,28 @@ def train_sa2c(
             resume_phase1 = True
             ckpt_path = best_warmup_path if best_warmup_path.exists() else legacy_warmup_path
         else:
+            if is_rank0():
+                logger.info(
+                    "continue: no checkpoint found in run_dir=%s (checked: %s, %s, %s)",
+                    str(run_dir),
+                    str(best_phase2_path.name),
+                    str(best_warmup_path.name),
+                    str(legacy_warmup_path.name),
+                )
             raise FileNotFoundError(
                 f"--continue requires {best_phase2_path.name} or {best_warmup_path.name} in run_dir={str(run_dir)}"
             )
+        if is_rank0():
+            if bool(use_pretrained_backbone):
+                logger.info("continue: loading full SA2C checkpoint overrides any pretrained_backbone init")
+            logger.info("continue: selected checkpoint=%s (resume_phase2=%s resume_phase1=%s)", str(ckpt_path), str(resume_phase2), str(resume_phase1))
         state = torch.load(str(ckpt_path), map_location=device)
         _unwrap(qn1).load_state_dict(state)
         _unwrap(qn2).load_state_dict(state)
+        if is_distributed() and (not is_rank0()):
+            logger.info("continue: rank=%d loaded checkpoint=%s", int(rank), str(ckpt_path))
+        elif is_rank0():
+            logger.info("continue: checkpoint loaded successfully")
         _logger = logging.getLogger(__name__)
         _prev_disabled = bool(getattr(_logger, "disabled", False))
         _logger.disabled = True

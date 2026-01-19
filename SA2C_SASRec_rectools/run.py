@@ -189,6 +189,12 @@ def _worker_main(
     logger = logging.getLogger(__name__)
     logger.info("run_dir: %s", str(run_dir))
     logger.info("dataset: %s", dataset_name)
+    if bool(continue_training) and is_rank0():
+        logger.info(
+            "continue: enabled; will resume SA2C from run_dir checkpoints if present (expected: %s, %s)",
+            str(run_dir / "best_model.pt"),
+            str(run_dir / "best_model_warmup.pt"),
+        )
     if bool(getattr(args, "smoke_cpu", False)):
         logger.info("smoke_cpu: enabled (forcing CPU, batch_size=8, epoch=1, skipping val/test result file writing)")
 
