@@ -3,13 +3,13 @@ dataset: retailrocket
 data: data
 epoch: 80
 warmup_epochs: null
-warmup_steps: 500
+warmup_steps: 300
 
 purchase_only: true
 
-batch_size_train: 128
+batch_size_train: 750
 batch_size_val: 256
-num_workers_train: 4
+num_workers_train: 6
 num_workers_val: 0
 device_id: cuda:0
 
