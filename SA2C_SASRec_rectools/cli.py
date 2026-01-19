@@ -24,6 +24,13 @@ def parse_args():
     parser.add_argument("--early_stopping_metric", type=str, default=None, help="Early stopping metric (ndcg@10).")
     parser.add_argument("--max_steps", type=int, default=None, help="If set, stop after this many update steps.")
     parser.add_argument(
+        "--batch-size-pct",
+        dest="batch_size_pct",
+        type=float,
+        default=None,
+        help="Scale batch_size_train and batch_size_val from config by this factor in (0, 1].",
+    )
+    parser.add_argument(
         "--plu-filter",
         dest="plu_filter",
         choices=("enable", "disable", "inverse"),

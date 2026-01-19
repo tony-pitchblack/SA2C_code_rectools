@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import numpy as np
 import yaml
 
@@ -136,6 +137,23 @@ def apply_cli_overrides(cfg: dict, args) -> dict:
         cfg["max_steps"] = int(args.max_steps)
     if bool(args.debug):
         cfg["debug"] = True
+
+    batch_size_pct = getattr(args, "batch_size_pct", None)
+    if batch_size_pct is not None:
+        try:
+            pct = float(batch_size_pct)
+        except Exception as e:
+            raise ValueError("--batch-size-pct must be a float in (0, 1]") from e
+        if not (0.0 < pct <= 1.0):
+            raise ValueError("--batch-size-pct must be a float in (0, 1]")
+        for k in ("batch_size_train", "batch_size_val"):
+            v = cfg.get(k, None)
+            if v is None:
+                continue
+            n = int(v)
+            if n <= 0:
+                continue
+            cfg[k] = max(1, int(math.floor(float(n) * float(pct))))
     return cfg
 
 
