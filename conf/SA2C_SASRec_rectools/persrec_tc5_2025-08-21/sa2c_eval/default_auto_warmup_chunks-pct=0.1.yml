@@ -17,7 +17,7 @@ purchase_only: false
 
 batch_size_train: 190
 batch_size_val: 128
-num_workers_train: 0
+num_workers_train: 12
 num_workers_val: 0
 device_id: cuda:0
 
