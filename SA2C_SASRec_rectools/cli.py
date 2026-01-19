@@ -28,7 +28,7 @@ def parse_args():
         dest="batch_size_pct",
         type=float,
         default=None,
-        help="Scale batch_size_train and batch_size_val from config by this factor in (0, 1].",
+        help="Scale batch_size_train and batch_size_val from config by this factor (>0).",
     )
     parser.add_argument(
         "--plu-filter",

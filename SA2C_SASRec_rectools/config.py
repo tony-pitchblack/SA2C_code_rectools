@@ -143,9 +143,9 @@ def apply_cli_overrides(cfg: dict, args) -> dict:
         try:
             pct = float(batch_size_pct)
         except Exception as e:
-            raise ValueError("--batch-size-pct must be a float in (0, 1]") from e
-        if not (0.0 < pct <= 1.0):
-            raise ValueError("--batch-size-pct must be a float in (0, 1]")
+            raise ValueError("--batch-size-pct must be a float > 0") from e
+        if not (pct > 0.0):
+            raise ValueError("--batch-size-pct must be a float > 0")
         for k in ("batch_size_train", "batch_size_val"):
             v = cfg.get(k, None)
             if v is None:
