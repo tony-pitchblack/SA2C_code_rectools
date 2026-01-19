@@ -8,7 +8,7 @@ def parse_args():
         "--continue",
         dest="continue_training",
         action="store_true",
-        help="Continue SA2C training from run_dir checkpoints (best_model.pt => phase2, best_model_warmup.pt => phase1).",
+        help="Continue training from run_dir checkpoints (SA2C: best_model.pt => phase2, best_model_warmup.pt => phase1; baseline: best_model.pt).",
     )
     parser.add_argument(
         "--eval-only",

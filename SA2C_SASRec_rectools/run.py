@@ -780,6 +780,7 @@ def _worker_main(
             ce_loss_vocab_size=ce_loss_vocab_size,
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
+            continue_training=continue_training,
         )
         if is_distributed():
             barrier()
