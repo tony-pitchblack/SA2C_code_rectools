@@ -8,6 +8,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from ..distributed import barrier, is_distributed, is_rank0
 from .persrec_tc5 import (
     ensure_data_statis,
     ensure_local_parquet_cache,
@@ -29,9 +30,19 @@ def load_or_build_bert4rec_splits(
     splits_path: Path,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     splits_path = Path(splits_path)
-    if splits_path.exists():
-        z = np.load(str(splits_path))
-        return z["train_idx"], z["val_idx"], z["test_idx"]
+    if is_distributed():
+        if not is_rank0():
+            barrier()
+            z = np.load(str(splits_path))
+            return z["train_idx"], z["val_idx"], z["test_idx"]
+        if splits_path.exists():
+            z = np.load(str(splits_path))
+            barrier()
+            return z["train_idx"], z["val_idx"], z["test_idx"]
+    else:
+        if splits_path.exists():
+            z = np.load(str(splits_path))
+            return z["train_idx"], z["val_idx"], z["test_idx"]
 
     n_rows = int(n_rows)
     eligible_val_idx = np.asarray(eligible_val_idx, dtype=np.int64)
@@ -70,6 +81,8 @@ def load_or_build_bert4rec_splits(
 
     splits_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(str(splits_path), train_idx=train_idx, val_idx=val_idx, test_idx=test_idx)
+    if is_distributed():
+        barrier()
     return train_idx, val_idx, test_idx
 
 

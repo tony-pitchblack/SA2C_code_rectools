@@ -88,6 +88,9 @@ def _worker_main(
 ) -> None:
     silence_logging_if_needed(is_rank0=is_rank0())
     eval_only = bool(getattr(args, "eval_only", False))
+    if bool(eval_only) and is_distributed() and (not is_rank0()):
+        barrier()
+        return
     continue_training = bool(getattr(args, "continue_training", False))
     config_path = args.config
 
@@ -600,14 +603,15 @@ def _worker_main(
                     ce_vocab_pct=ce_vocab_pct,
                 )
 
-        write_results(
-            run_dir=run_dir,
-            val_best=val_best,
-            test_best=test_best,
-            val_warmup=val_warmup,
-            test_warmup=test_warmup,
-            smoke_cpu=smoke_cpu,
-        )
+        if is_rank0():
+            write_results(
+                run_dir=run_dir,
+                val_best=val_best,
+                test_best=test_best,
+                val_warmup=val_warmup,
+                test_warmup=test_warmup,
+                smoke_cpu=smoke_cpu,
+            )
         if is_distributed():
             barrier()
         return
@@ -659,6 +663,8 @@ def _worker_main(
             pin_memory=pin_memory,
             max_steps=max_steps,
         )
+        if is_distributed():
+            barrier()
         warmup_path = None
         best_model = Albert4Rec(
             item_num=item_num,
@@ -692,6 +698,8 @@ def _worker_main(
             reward_fn=reward_fn,
             evaluate_fn=eval_fn,
         )
+        if is_distributed():
+            barrier()
         warmup_path = None
         best_model = SASRecQNetworkRectools(
             item_num=item_num,
@@ -736,6 +744,8 @@ def _worker_main(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
         )
+        if is_distributed():
+            barrier()
         best_model = SASRecQNetworkRectools(
             item_num=item_num,
             state_size=state_size,
@@ -771,6 +781,8 @@ def _worker_main(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
         )
+        if is_distributed():
+            barrier()
         warmup_path = None
         best_model = SASRecBaselineRectools(
             item_num=item_num,
@@ -872,14 +884,15 @@ def _worker_main(
             ce_vocab_pct=ce_vocab_pct,
         )
 
-    write_results(
-        run_dir=run_dir,
-        val_best=val_best,
-        test_best=test_best,
-        val_warmup=val_warmup,
-        test_warmup=test_warmup,
-        smoke_cpu=smoke_cpu,
-    )
+    if is_rank0():
+        write_results(
+            run_dir=run_dir,
+            val_best=val_best,
+            test_best=test_best,
+            val_warmup=val_warmup,
+            test_warmup=test_warmup,
+            smoke_cpu=smoke_cpu,
+        )
     if is_distributed():
         barrier()
 

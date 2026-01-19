@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from ..distributed import barrier, is_distributed, is_rank0
 from ..utils import tqdm
 
 
@@ -42,9 +43,21 @@ def hdfs_get(src: str, dst: str):
 def ensure_local_parquet_cache(*, hdfs_working_prefix: str, local_parquet_dir: Path):
     logger = logging.getLogger(__name__)
     local_parquet_dir = Path(local_parquet_dir)
-    if local_parquet_dir.exists() and any(local_parquet_dir.iterdir()):
-        logger.info("persrec_tc5: using raw parquet cache at %s", str(local_parquet_dir))
-        return
+    ready = local_parquet_dir.exists() and any(local_parquet_dir.iterdir())
+    if is_distributed():
+        if not is_rank0():
+            barrier()
+            if not (local_parquet_dir.exists() and any(local_parquet_dir.iterdir())):
+                raise RuntimeError(f"persrec_tc5: raw parquet cache is missing after rank0 sync: {str(local_parquet_dir)}")
+            return
+        if ready:
+            logger.info("persrec_tc5: using raw parquet cache at %s", str(local_parquet_dir))
+            barrier()
+            return
+    else:
+        if ready:
+            logger.info("persrec_tc5: using raw parquet cache at %s", str(local_parquet_dir))
+            return
     local_parquet_dir.parent.mkdir(parents=True, exist_ok=True)
     src = str(Path(hdfs_working_prefix) / "training" / "dataset_train.parquet")
     dst = str(local_parquet_dir)
@@ -54,6 +67,8 @@ def ensure_local_parquet_cache(*, hdfs_working_prefix: str, local_parquet_dir: P
     logger.info("persrec_tc5: hdfs download done in %.3fs", float(time.perf_counter() - t0))
     if not local_parquet_dir.exists():
         raise RuntimeError(f"HDFS download completed but local path does not exist: {str(local_parquet_dir)}")
+    if is_distributed():
+        barrier()
 
 
 def _list_parquet_part_files(parquet_dir: Path) -> list[Path]:
@@ -104,33 +119,53 @@ def ensure_mapped_parquet_cache(
     source_parquet_dir = Path(source_parquet_dir)
     mapped_parquet_dir = Path(mapped_parquet_dir)
     mapped_meta_path = Path(mapped_meta_path)
-    if mapped_parquet_dir.exists() and any(mapped_parquet_dir.iterdir()) and mapped_meta_path.exists():
-        meta_ok = False
+    def _is_ready() -> bool:
+        if not (mapped_parquet_dir.exists() and any(mapped_parquet_dir.iterdir()) and mapped_meta_path.exists()):
+            return False
         try:
             z = np.load(str(mapped_meta_path))
-            meta_ok = "plu_idxs" in getattr(z, "files", [])
+            return "plu_idxs" in getattr(z, "files", [])
         except Exception:
-            meta_ok = False
-        if meta_ok:
+            return False
+
+    if is_distributed():
+        if not is_rank0():
+            barrier()
+            if not _is_ready():
+                raise RuntimeError(
+                    f"persrec_tc5: mapped parquet cache is missing/incomplete after rank0 sync: {str(mapped_parquet_dir)}"
+                )
+            return
+        if _is_ready():
+            logger.info(
+                "persrec_tc5: using mapped parquet cache at %s (meta=%s)",
+                str(mapped_parquet_dir),
+                str(mapped_meta_path),
+            )
+            barrier()
+            return
+    else:
+        if _is_ready():
             logger.info(
                 "persrec_tc5: using mapped parquet cache at %s (meta=%s)",
                 str(mapped_parquet_dir),
                 str(mapped_meta_path),
             )
             return
-        logger.info(
-            "persrec_tc5: mapped parquet cache at %s is missing `plu_idxs` in meta=%s -> rebuilding",
-            str(mapped_parquet_dir),
-            str(mapped_meta_path),
-        )
-        try:
-            shutil.rmtree(str(mapped_parquet_dir))
-        except Exception:
-            pass
-        try:
-            mapped_meta_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        if mapped_parquet_dir.exists() and any(mapped_parquet_dir.iterdir()) and mapped_meta_path.exists():
+            logger.info(
+                "persrec_tc5: mapped parquet cache at %s is missing `plu_idxs` in meta=%s -> rebuilding",
+                str(mapped_parquet_dir),
+                str(mapped_meta_path),
+            )
+            try:
+                shutil.rmtree(str(mapped_parquet_dir))
+            except Exception:
+                pass
+            try:
+                mapped_meta_path.unlink(missing_ok=True)
+            except Exception:
+                pass
     logger.info(
         "persrec_tc5: mapped parquet cache missing/incomplete at %s (meta=%s) -> building from %s (max_parts=%s)",
         str(mapped_parquet_dir),
@@ -191,6 +226,8 @@ def ensure_mapped_parquet_cache(
         float(time.perf_counter() - t0),
         str(mapped_parquet_dir),
     )
+    if is_distributed():
+        barrier()
 
 
 def prepare_persrec_tc5_from_df(
@@ -250,10 +287,21 @@ def prepare_persrec_tc5_from_df(
 def load_or_build_row_splits(*, n_rows: int, splits_path: Path, seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     logger = logging.getLogger(__name__)
     splits_path = Path(splits_path)
-    if splits_path.exists():
-        logger.info("persrec_tc5: loading splits from %s", str(splits_path))
-        z = np.load(str(splits_path))
-        return z["train_idx"], z["val_idx"], z["test_idx"]
+    if is_distributed():
+        if not is_rank0():
+            barrier()
+            z = np.load(str(splits_path))
+            return z["train_idx"], z["val_idx"], z["test_idx"]
+        if splits_path.exists():
+            logger.info("persrec_tc5: loading splits from %s", str(splits_path))
+            z = np.load(str(splits_path))
+            barrier()
+            return z["train_idx"], z["val_idx"], z["test_idx"]
+    else:
+        if splits_path.exists():
+            logger.info("persrec_tc5: loading splits from %s", str(splits_path))
+            z = np.load(str(splits_path))
+            return z["train_idx"], z["val_idx"], z["test_idx"]
     logger.info("persrec_tc5: creating splits (80/10/10) at %s", str(splits_path))
     rng = np.random.RandomState(int(seed))
     perm = rng.permutation(int(n_rows))
@@ -270,27 +318,49 @@ def load_or_build_row_splits(*, n_rows: int, splits_path: Path, seed: int) -> tu
         int(val_idx.shape[0]),
         int(test_idx.shape[0]),
     )
+    if is_distributed():
+        barrier()
     return train_idx, val_idx, test_idx
 
 
 def ensure_data_statis(path: Path, *, state_size: int, item_num: int):
     logger = logging.getLogger(__name__)
     path = Path(path)
-    if path.exists():
-        logger.info("persrec_tc5: data_statis exists at %s", str(path))
-        return
+    if is_distributed():
+        if not is_rank0():
+            barrier()
+            return
+        if path.exists():
+            logger.info("persrec_tc5: data_statis exists at %s", str(path))
+            barrier()
+            return
+    else:
+        if path.exists():
+            logger.info("persrec_tc5: data_statis exists at %s", str(path))
+            return
     path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame({"state_size": [int(state_size)], "item_num": [int(item_num)]})
     df.to_pickle(str(path))
     logger.info("persrec_tc5: wrote data_statis to %s", str(path))
+    if is_distributed():
+        barrier()
 
 
 def ensure_pop_dict(path: Path, *, counts: np.ndarray):
     logger = logging.getLogger(__name__)
     path = Path(path)
-    if path.exists():
-        logger.info("persrec_tc5: pop_dict exists at %s", str(path))
-        return
+    if is_distributed():
+        if not is_rank0():
+            barrier()
+            return
+        if path.exists():
+            logger.info("persrec_tc5: pop_dict exists at %s", str(path))
+            barrier()
+            return
+    else:
+        if path.exists():
+            logger.info("persrec_tc5: pop_dict exists at %s", str(path))
+            return
     path.parent.mkdir(parents=True, exist_ok=True)
     total = float(np.asarray(counts, dtype=np.float64).sum())
     if total <= 0:
@@ -300,6 +370,8 @@ def ensure_pop_dict(path: Path, *, counts: np.ndarray):
     with open(path, "w") as f:
         f.write(str(pop))
     logger.info("persrec_tc5: wrote pop_dict to %s", str(path))
+    if is_distributed():
+        barrier()
 
 
 class PersrecTC5UserSeqDataset(Dataset):
