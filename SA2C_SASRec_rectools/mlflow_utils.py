@@ -9,6 +9,7 @@ import mlflow
 import torch
 import torch.nn.functional as F
 from dotenv import dotenv_values
+from mlflow.tracking import MlflowClient
 
 from .config import resolve_ce_sampling, validate_pointwise_critic_cfg
 from .data_utils.sessions import make_shifted_batch_from_sessions
@@ -39,8 +40,19 @@ def setup_mlflow_tracking(*, repo_root: Path, timeout_s: float = 2.0) -> str:
     return uri
 
 
+def require_mlflow_run_exists(*, run_id: str) -> None:
+    rid = str(run_id).strip()
+    if not rid:
+        raise RuntimeError("MLflow run_id is empty")
+    client = MlflowClient()
+    try:
+        _ = client.get_run(rid)
+    except Exception as e:
+        raise RuntimeError(f"MLflow run_id not found: {rid}") from e
+
+
 def format_experiment_name(*, dataset_name: str, eval_scheme: str | None, limit_chunks_pct: float | None) -> str:
-    suffix = str(eval_scheme) if eval_scheme is not None else "default"
+    suffix = str(eval_scheme) if eval_scheme is not None else "sa2c_eval"
     name = f"{dataset_name}-{suffix}"
     if limit_chunks_pct is not None:
         pct = float(limit_chunks_pct) * 100.0

@@ -48,6 +48,7 @@ from .mlflow_utils import (
     flatten_eval_metrics_for_mlflow,
     format_experiment_name,
     log_metrics_dict,
+    require_mlflow_run_exists,
     setup_mlflow_tracking,
 )
 from .models import Albert4Rec, SASRecBaselineRectools, SASRecQNetworkRectools
@@ -98,7 +99,10 @@ def _worker_main(
 ) -> None:
     silence_logging_if_needed(is_rank0=is_rank0())
     eval_only = bool(getattr(args, "eval_only", False))
-    continue_training = bool(getattr(args, "continue_training", False))
+    continue_run_id = getattr(args, "continue_training", None)
+    if continue_run_id is not None:
+        continue_run_id = str(continue_run_id).strip() or None
+    continue_training = bool(continue_run_id)
     config_path = args.config
 
     model_type = str(cfg.get("model_type", "sasrec")).strip().lower()
@@ -162,6 +166,8 @@ def _worker_main(
     eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
     if persrec_tc5 and eval_scheme == "bert4rec_eval" and plu_filter_mode in {"disable", "inverse"}:
         eval_scheme = f"bert4rec_eval_plu-{'disable' if plu_filter_mode == 'disable' else 'inverse'}"
+    if eval_scheme is None:
+        eval_scheme = "sa2c_eval"
     run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
 
     pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
@@ -252,6 +258,8 @@ def _worker_main(
     experiment_name = format_experiment_name(dataset_name=dataset_name, eval_scheme=eval_scheme, limit_chunks_pct=limit_chunks_pct)
     if mlflow_enabled:
         setup_mlflow_tracking(repo_root=repo_root)
+        if continue_run_id is not None:
+            require_mlflow_run_exists(run_id=str(continue_run_id))
 
     if bool(eval_only) and is_distributed() and (not is_rank0()):
         barrier()
@@ -477,7 +485,10 @@ def _worker_main(
     mlflow_active = False
     if mlflow_enabled and is_rank0():
         mlflow.set_experiment(experiment_name)
-        mlflow.start_run(run_name=str(config_name))
+        if continue_run_id is not None:
+            mlflow.start_run(run_id=str(continue_run_id))
+        else:
+            mlflow.start_run(run_name=str(config_name))
         mlflow_active = True
 
     def _log_train_losses(step: int, metrics: dict[str, float]) -> None:
