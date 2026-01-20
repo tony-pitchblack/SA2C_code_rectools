@@ -60,11 +60,13 @@ python scripts/plot_test_results.py --max-metric-value 1.0 0.6 0.3
 
 #### persrec_tc5_2025-08-21 (sa2c_eval)
 
-**NOTE:** probably incorrect evaluation (not 1:1 LOO `sa2c` evaluation)
-
 ![persrec_tc5_2025-08-21 sa2c_eval](results/plots/persrec_tc5_2025-08-21/sa2c_eval/test_results.png)
 
 #### persrec_tc5_2025-08-21 (bert4rec_eval)
+
+**WARNING:** probably incorrect evaluation (not 1:1 LOO `bert4recv1` evaluation, see `NOTE 2`)
+
+**TODO:** stacking more transformer layers & heads (a.k.a approx hparams experiment) is promising, need to be re-evaluated in `bert4recv` repo
 
 ![persrec_tc5_2025-08-21 bert4rec_eval](results/plots/persrec_tc5_2025-08-21/bert4rec_eval/test_results.png)
 
