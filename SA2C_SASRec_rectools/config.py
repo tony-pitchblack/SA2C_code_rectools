@@ -42,6 +42,7 @@ def default_config() -> dict:
             "critic_lr": None,
             "gamma": 0.5,
         },
+        "warmup_steps": None,
         "warmup_epochs": 0.02,
         "early_stopping_warmup_ep": None,
         "batch_size_train": 256,

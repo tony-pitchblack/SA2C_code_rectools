@@ -211,6 +211,21 @@ def train_sa2c(
     use_auto_warmup = warmup_patience is not None
     stop_training = False
 
+    warmup_steps_cfg = cfg.get("warmup_steps", None)
+    warmup_epochs_cfg = cfg.get("warmup_epochs", 0.0)
+    if warmup_steps_cfg is not None:
+        if warmup_epochs_cfg is not None:
+            raise ValueError("warmup_steps and warmup_epochs are mutually exclusive; set one to null")
+        warmup_steps = int(warmup_steps_cfg)
+        if int(warmup_steps) < 0:
+            raise ValueError("warmup_steps must be null or a non-negative int")
+        warmup_epochs = None
+    else:
+        warmup_steps = None
+        warmup_epochs = None if warmup_epochs_cfg is None else float(warmup_epochs_cfg)
+        if warmup_epochs is not None and float(warmup_epochs) < 0.0:
+            raise ValueError("warmup_epochs must be null or a float >= 0")
+
     best_metric_warmup = float("-inf")
     epochs_since_improve_warmup = 0
     best_warmup_path = run_dir / "best_model_warmup.pt"
@@ -363,10 +378,13 @@ def train_sa2c(
 
             step_count = int(valid_mask.sum().item())
             discount = torch.full((step_count,), float(cfg.get("discount", 0.5)), dtype=torch.float32, device=device)
-            warmup_epochs = float(cfg.get("warmup_epochs", 0.0))
             epoch_progress = float(epoch_idx) + (float(batch_idx) / float(max(1, num_batches)))
+            global_batch_idx = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx)
             if phase == "scheduled":
-                in_warmup = (not resume_phase2) and (epoch_progress < warmup_epochs)
+                if warmup_steps is not None:
+                    in_warmup = (not resume_phase2) and (int(global_batch_idx) < int(warmup_steps))
+                else:
+                    in_warmup = (not resume_phase2) and (warmup_epochs is not None) and (epoch_progress < float(warmup_epochs))
             else:
                 in_warmup = phase == "warmup"
 
@@ -823,9 +841,15 @@ def train_sa2c(
                     logger.info("finetune early stopping triggered")
                     break
         else:
-            if (not use_auto_warmup) and (phase == "scheduled") and (not entered_finetune) and float(
-                cfg.get("warmup_epochs", 0.0)
-            ) > 0.0:
+            if (
+                (not use_auto_warmup)
+                and (phase == "scheduled")
+                and (not entered_finetune)
+                and (
+                    (warmup_steps is not None and int(warmup_steps) > 0)
+                    or (warmup_steps is None and warmup_epochs is not None and float(warmup_epochs) > 0.0)
+                )
+            ):
                 if metric > best_metric_warmup:
                     best_metric_warmup = metric
                     best_metric_overall = float(best_metric_warmup)
