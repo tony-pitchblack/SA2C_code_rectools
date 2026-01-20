@@ -180,7 +180,11 @@ CUDA_VISIBLE_DEVICES=2 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/baseline_approx_hparams_chunks-pct=0.1.yml --batch-size-pct 0.75
 CUDA_VISIBLE_DEVICES=2 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_auto_warmup.yml
 CUDA_VISIBLE_DEVICES=2 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_optimal_warmup.yml
-CUDA_VISIBLE_DEVICES=2 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_optimal_warmup_purchase_only_chunks-pct=0.1.yml
+CUDA_VISIBLE_DEVICES=2 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_optimal_warmup_chunks-pct=0.1.yml
+
+# migrate existing run_dir after config rename
+mv logs/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_optimal_warmup_purchase_only_chunks-pct=0.1 \
+   logs/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_optimal_warmup_chunks-pct=0.1
 CUDA_VISIBLE_DEVICES=2 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_auto_warmup_chunks-pct=0.1.yml
 CUDA_VISIBLE_DEVICES=2 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_auto_warmup_approx_hparams_chunks-pct=0.1.yml
 CUDA_VISIBLE_DEVICES=6,7 torchrun --standalone --nproc_per_node=2 --module SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/persrec_tc5_2025-08-21/sa2c_eval/default_auto_warmup_approx_hparams_chunks-pct=0.1.yml --batch-size-pct 0.75
