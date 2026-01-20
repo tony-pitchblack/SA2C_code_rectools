@@ -167,8 +167,14 @@ def _resolve_ce_n_negatives_cfg(cfg: dict):
         if v is not None:
             return v
     sampled_cfg = cfg.get("sampled_loss") or {}
-    if isinstance(sampled_cfg, dict) and ("ce_n_negatives" in sampled_cfg):
-        return sampled_cfg.get("ce_n_negatives", None)
+    if isinstance(sampled_cfg, dict):
+        if not bool(sampled_cfg.get("use", False)):
+            return None
+        if "ce_n_negatives" in sampled_cfg:
+            v = sampled_cfg.get("ce_n_negatives", None)
+            if v is not None:
+                return v
+        return 256
     return None
 
 
