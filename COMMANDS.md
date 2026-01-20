@@ -13,6 +13,17 @@ source .venv/bin/activate
 uv pip install -r dependencies/requirements_torch.txt
 ```
 
+## Start MLflow server (tmux)
+
+- Requires `.env` with `MLFLOW_HOST` + `MLFLOW_PORT` (example: `MLFLOW_HOST=0.0.0.0`, `MLFLOW_PORT=5000`).
+
+```bash
+source .venv/bin/activate
+uv pip install -r dependencies/requirements_torch.txt
+
+bash scripts/start_mlflow_tmux.sh
+```
+
 ## Sampled softmax (CE) with 1/4 vocab
 
 - Add `ce_n_negatives: 0.25` to your rectools YAML config (top-level). This sets the number of sampled negatives to \(\lfloor 0.25 * item\_num \rfloor\).
