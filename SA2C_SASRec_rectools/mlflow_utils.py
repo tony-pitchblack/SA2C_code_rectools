@@ -9,7 +9,7 @@ import mlflow
 import requests
 import torch
 import torch.nn.functional as F
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from .config import resolve_ce_sampling, validate_pointwise_critic_cfg
 from .data_utils.sessions import make_shifted_batch_from_sessions
@@ -32,9 +32,12 @@ def _normalize_mlflow_host(host: str) -> str:
 
 
 def setup_mlflow_tracking(*, repo_root: Path, timeout_s: float = 2.0) -> str:
-    load_dotenv(repo_root / ".env", override=False)
-    host = os.environ.get("MLFLOW_HOST", "")
-    port = os.environ.get("MLFLOW_PORT", "")
+    env_path = repo_root / ".env"
+    if not env_path.exists():
+        raise RuntimeError(f"Missing required file: {env_path}")
+    values = dotenv_values(env_path)
+    host = values.get("MLFLOW_HOST", "")
+    port = values.get("MLFLOW_PORT", "")
     host = _normalize_mlflow_host(host)
     port = _strip_wrapping_quotes(port).strip()
     if not host or not port:
