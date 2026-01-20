@@ -8,9 +8,14 @@ def parse_args():
         "--continue",
         dest="continue_training",
         type=str,
+        nargs="?",
+        const="",
         default=None,
         metavar="MLFLOW_RUN_ID",
-        help="Continue training from run_dir checkpoints and log to an existing MLflow run_id.",
+        help=(
+            "Continue from run_dir checkpoints. If MLFLOW_RUN_ID is provided, logs to that MLflow run. "
+            "If used with --eval-only and no run id, evaluates and writes results locally without MLflow."
+        ),
     )
     parser.add_argument(
         "--eval-only",

@@ -99,10 +99,12 @@ def _worker_main(
 ) -> None:
     silence_logging_if_needed(is_rank0=is_rank0())
     eval_only = bool(getattr(args, "eval_only", False))
-    continue_run_id = getattr(args, "continue_training", None)
-    if continue_run_id is not None:
-        continue_run_id = str(continue_run_id).strip() or None
-    continue_training = bool(continue_run_id)
+    continue_arg = getattr(args, "continue_training", None)
+    continue_requested = continue_arg is not None
+    continue_run_id = None
+    if continue_arg is not None:
+        continue_run_id = str(continue_arg).strip() or None
+    continue_training = bool(continue_requested)
     config_path = args.config
 
     model_type = str(cfg.get("model_type", "sasrec")).strip().lower()
@@ -254,7 +256,8 @@ def _worker_main(
             raise ValueError("limit_chunks_pct cannot be used together with --sanity")
 
     gs_cfg = cfg.get("gridsearch") or {}
-    mlflow_enabled = not bool(gs_cfg.get("enable", False))
+    local_only_eval = bool(eval_only) and bool(continue_requested) and (continue_run_id is None)
+    mlflow_enabled = (not bool(gs_cfg.get("enable", False))) and (not bool(local_only_eval))
     experiment_name = format_experiment_name(dataset_name=dataset_name, eval_scheme=eval_scheme, limit_chunks_pct=limit_chunks_pct)
     if mlflow_enabled:
         setup_mlflow_tracking(repo_root=repo_root)
@@ -479,7 +482,7 @@ def _worker_main(
         raise ValueError("gridsearch is not supported for albert4rec")
     if trainer == "crr" and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch is not supported for trainer=crr")
-    if continue_training and bool(gs_cfg.get("enable", False)):
+    if (not eval_only) and continue_training and bool(gs_cfg.get("enable", False)):
         raise ValueError("--continue is not supported with gridsearch.enable=true")
 
     mlflow_active = False
