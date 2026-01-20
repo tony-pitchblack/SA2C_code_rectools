@@ -70,11 +70,11 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 # purchase-only
 CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/retailrocket/purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_purchase_only.yml
-CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_ndcg_purchase_only.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/ndcg_auto_warmup_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_auto_warmup_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_purchase_only.yml
-CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/default_ndcg_purchase_only.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/ndcg_auto_warmup_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/retailrocket/baseline.yml --smoke-cpu --max_steps 64
 ```
 
@@ -102,11 +102,11 @@ CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_
 # purchase-only
 CUDA_VISIBLE_DEVICES=3 python SA2C_SASRec_torch.py --config conf/SA2C_SASRec_torch/yoochoose/purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_purchase_only.yml
-CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_ndcg_purchase_only.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/ndcg_auto_warmup_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_auto_warmup_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_purchase_only.yml
-CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/default_ndcg_purchase_only.yml
+CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/ndcg_auto_warmup_purchase_only.yml
 CUDA_VISIBLE_DEVICES=3 python -m SA2C_SASRec_rectools --config conf/SA2C_SASRec_rectools/yoochoose/baseline.yml --smoke-cpu --max_steps 64
 ```
 
