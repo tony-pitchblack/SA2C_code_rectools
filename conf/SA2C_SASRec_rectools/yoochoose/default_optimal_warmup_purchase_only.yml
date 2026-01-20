@@ -1,13 +1,15 @@
 seed: 0
-dataset: retailrocket
+dataset: yoochoose
 data: data
 epoch: 80
+warmup_epochs: null
+warmup_steps: 750
 
 purchase_only: true
 
-batch_size_train: 3200
+batch_size_train: 256
 batch_size_val: 256
-num_workers_train: 8
+num_workers_train: 4
 num_workers_val: 0
 device_id: cuda:0
 
@@ -28,11 +30,9 @@ clip: 0.0
 lr: 0.005
 lr_2: 0.001
 
-early_stopping_warmup_ep: 5
-early_stopping_ep: 10
-early_stopping_metric: ndcg@10
-
 max_steps: 0
 debug: false
 
+early_stopping_ep: 7
+early_stopping_metric: ndcg@10
 

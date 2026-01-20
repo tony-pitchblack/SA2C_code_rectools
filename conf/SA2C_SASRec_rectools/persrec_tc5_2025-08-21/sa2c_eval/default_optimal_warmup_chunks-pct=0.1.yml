@@ -13,7 +13,10 @@ reward_fn: click_buy
 
 limit_chunks_pct: 0.1
 
-purchase_only: false
+warmup_epochs: null
+warmup_steps: 2000
+
+purchase_only: true
 
 batch_size_train: 190
 batch_size_val: 128
@@ -41,7 +44,7 @@ lr_2: 0.001
 sampled_loss:
   use: false
 
-early_stopping_warmup_ep: 5
+early_stopping_warmup_ep: null
 early_stopping_ep: 10
 early_stopping_metric: ndcg@10
 

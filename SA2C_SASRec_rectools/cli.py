@@ -7,8 +7,15 @@ def parse_args():
     parser.add_argument(
         "--continue",
         dest="continue_training",
-        action="store_true",
-        help="Continue training from run_dir checkpoints (SA2C: best_model.pt => phase2, best_model_warmup.pt => phase1; baseline: best_model.pt).",
+        type=str,
+        nargs="?",
+        const="",
+        default=None,
+        metavar="MLFLOW_RUN_ID",
+        help=(
+            "Continue from run_dir checkpoints. If MLFLOW_RUN_ID is provided, logs to that MLflow run. "
+            "If used with --eval-only and no run id, evaluates and writes results locally without MLflow."
+        ),
     )
     parser.add_argument(
         "--eval-only",
