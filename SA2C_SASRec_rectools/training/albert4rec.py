@@ -4,6 +4,7 @@ import logging
 import math
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -81,6 +82,9 @@ def train_albert4rec(
     pin_memory: bool,
     max_steps: int,
     metric_key: str = "overall.ndcg@10",
+    on_train_log: Callable[[int, dict[str, float]], None] | None = None,
+    on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_val_end: Callable[[int, dict], None] | None = None,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -118,6 +122,8 @@ def train_albert4rec(
     stop_training = False
 
     for epoch_idx in range(num_epochs):
+        epoch_loss_sum = 0.0
+        epoch_tokens = 0
         if num_batches > 0:
             sampler = RandomSampler(train_ds, replacement=True, num_samples=num_batches * int(train_batch_size))
             t0 = time.perf_counter()
@@ -139,12 +145,14 @@ def train_albert4rec(
             logger.info("build_s train_dl=%.3f", float(train_dl_s))
 
         model.train()
-        for batch in tqdm(
+        for batch_idx, batch in enumerate(
+            tqdm(
             dl,
             total=num_batches,
             desc=f"train epoch {epoch_idx + 1}/{num_epochs}",
             unit="batch",
             dynamic_ncols=True,
+            )
         ):
             if max_steps > 0 and total_step >= max_steps:
                 stop_training = True
@@ -166,10 +174,22 @@ def train_albert4rec(
             if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                 raise FloatingPointError(f"Non-finite loss (albert4rec) at total_step={int(total_step)}")
 
+            n_tok = int(pos.shape[0])
+            if n_tok > 0:
+                epoch_loss_sum += float(loss.detach().item()) * float(n_tok)
+                epoch_tokens += int(n_tok)
+
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             total_step += int(pos.shape[0])
+
+            if on_train_log is not None and int(n_tok) > 0:
+                global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
+                on_train_log(int(global_step), {"train_per_batch/loss_ce": float(loss.detach().item())})
+
+        if on_epoch_end is not None and int(epoch_tokens) > 0:
+            on_epoch_end(int(epoch_idx + 1), {"train/loss_ce": float(epoch_loss_sum / float(epoch_tokens))})
 
         val_metrics = evaluate_albert4rec_loo(
             model,
@@ -185,6 +205,8 @@ def train_albert4rec(
             epoch=int(epoch_idx + 1),
             num_epochs=int(num_epochs),
         )
+        if on_val_end is not None:
+            on_val_end(int(epoch_idx + 1), val_metrics)
         metric = float(get_metric_value(val_metrics, metric_key))
         if metric > best_metric:
             best_metric = metric

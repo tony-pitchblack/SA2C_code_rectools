@@ -58,7 +58,8 @@ def make_albert4rec_loader(
     shuffle: bool,
     sampler=None,
 ):
-    persistent_workers = int(num_workers) > 0
+    num_workers = max(1, int(num_workers))
+    persistent_workers = True
     return DataLoader(
         ds,
         batch_size=int(batch_size),

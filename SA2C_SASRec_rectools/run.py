@@ -7,6 +7,7 @@ import shutil
 import time
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pandas as pd
 import torch
@@ -40,6 +41,16 @@ from .distributed import (
     silence_logging_if_needed,
 )
 from .logging_utils import configure_logging, dump_config
+from .mlflow_utils import (
+    compute_albert4rec_ce_loss,
+    compute_baseline_ce_loss,
+    compute_sa2c_losses,
+    flatten_eval_metrics_for_mlflow,
+    format_experiment_name,
+    log_metrics_dict,
+    require_mlflow_run_exists,
+    setup_mlflow_tracking,
+)
 from .models import Albert4Rec, SASRecBaselineRectools, SASRecQNetworkRectools
 from .paths import make_run_dir, resolve_dataset_root
 from .metrics import evaluate, evaluate_albert4rec_loo, evaluate_loo, evaluate_loo_candidates
@@ -88,10 +99,12 @@ def _worker_main(
 ) -> None:
     silence_logging_if_needed(is_rank0=is_rank0())
     eval_only = bool(getattr(args, "eval_only", False))
-    if bool(eval_only) and is_distributed() and (not is_rank0()):
-        barrier()
-        return
-    continue_training = bool(getattr(args, "continue_training", False))
+    continue_arg = getattr(args, "continue_training", None)
+    continue_requested = continue_arg is not None
+    continue_run_id = None
+    if continue_arg is not None:
+        continue_run_id = str(continue_arg).strip() or None
+    continue_training = bool(continue_requested)
     config_path = args.config
 
     model_type = str(cfg.get("model_type", "sasrec")).strip().lower()
@@ -155,6 +168,8 @@ def _worker_main(
     eval_scheme = _infer_eval_scheme_from_config_path(config_path, dataset_name=dataset_name)
     if persrec_tc5 and eval_scheme == "bert4rec_eval" and plu_filter_mode in {"disable", "inverse"}:
         eval_scheme = f"bert4rec_eval_plu-{'disable' if plu_filter_mode == 'disable' else 'inverse'}"
+    if eval_scheme is None:
+        eval_scheme = "sa2c_eval"
     run_dir = make_run_dir(dataset_name, config_name, eval_scheme=eval_scheme)
 
     pretrained_backbone_cfg = cfg.get("pretrained_backbone") or {}
@@ -239,6 +254,19 @@ def _worker_main(
             raise ValueError("limit_chunks_pct for sessions datasets requires bert4rec_loo.enable=true")
         if bool(sanity):
             raise ValueError("limit_chunks_pct cannot be used together with --sanity")
+
+    gs_cfg = cfg.get("gridsearch") or {}
+    local_only_eval = bool(eval_only) and bool(continue_requested) and (continue_run_id is None)
+    mlflow_enabled = (not bool(gs_cfg.get("enable", False))) and (not bool(local_only_eval))
+    experiment_name = format_experiment_name(dataset_name=dataset_name, eval_scheme=eval_scheme, limit_chunks_pct=limit_chunks_pct)
+    if mlflow_enabled:
+        setup_mlflow_tracking(repo_root=repo_root)
+        if continue_run_id is not None:
+            require_mlflow_run_exists(run_id=str(continue_run_id))
+
+    if bool(eval_only) and is_distributed() and (not is_rank0()):
+        barrier()
+        return
 
     num_epochs = int(cfg.get("epoch", 50))
     max_steps = int(cfg.get("max_steps", 0))
@@ -448,15 +476,39 @@ def _worker_main(
         )
     test_dl_s = time.perf_counter() - t0
 
-    gs_cfg = cfg.get("gridsearch") or {}
     if is_distributed() and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch.enable=true is not supported with DDP")
     if model_type == "albert4rec" and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch is not supported for albert4rec")
     if trainer == "crr" and bool(gs_cfg.get("enable", False)):
         raise ValueError("gridsearch is not supported for trainer=crr")
-    if continue_training and bool(gs_cfg.get("enable", False)):
+    if (not eval_only) and continue_training and bool(gs_cfg.get("enable", False)):
         raise ValueError("--continue is not supported with gridsearch.enable=true")
+
+    mlflow_active = False
+    if mlflow_enabled and is_rank0():
+        mlflow.set_experiment(experiment_name)
+        if continue_run_id is not None:
+            mlflow.start_run(run_id=str(continue_run_id))
+        else:
+            mlflow.start_run(run_name=str(config_name))
+        mlflow_active = True
+
+    def _log_train_losses(step: int, metrics: dict[str, float]) -> None:
+        if not mlflow_active:
+            return
+        log_metrics_dict(metrics, step=int(step))
+
+    def _log_epoch_metrics(epoch: int, metrics: dict[str, float]) -> None:
+        if not mlflow_active:
+            return
+        log_metrics_dict(metrics, step=int(epoch))
+
+    def _log_val_metrics(epoch: int, metrics: dict) -> None:
+        if not mlflow_active:
+            return
+        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="val", metrics=metrics), step=int(epoch))
+
     if eval_only:
         if is_distributed() and (not is_rank0()):
             barrier()
@@ -549,9 +601,15 @@ def _worker_main(
             ce_vocab_pct=ce_vocab_pct,
         )
 
+        if mlflow_active:
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val", metrics=val_best))
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test", metrics=test_best))
+
         val_warmup = None
         test_warmup = None
-        if enable_sa2c and model_type != "albert4rec":
+        warmup_model = None
+        warmup_path = None
+        if trainer == "sa2c" and model_type != "albert4rec":
             warmup_path = ckpt_run_dir / "best_model_warmup.pt"
             if not warmup_path.exists():
                 warmup_path = ckpt_run_dir / "best_warmup_model.pt"
@@ -602,6 +660,147 @@ def _worker_main(
                     ce_full_vocab_size=ce_full_vocab_size,
                     ce_vocab_pct=ce_vocab_pct,
                 )
+                if mlflow_active:
+                    log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val_warmup", metrics=val_warmup))
+                    log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test_warmup", metrics=test_warmup))
+
+        if mlflow_active:
+            if model_type == "albert4rec":
+                a4 = cfg.get("albert4rec") or {}
+                n_neg = int(a4.get("n_negatives", 256)) if isinstance(a4, dict) else 256
+                log_metrics_dict(
+                    {
+                        "val/loss_ce": compute_albert4rec_ce_loss(
+                            model=best_model,
+                            session_loader=val_dl,
+                            device=device,
+                            state_size=state_size,
+                            item_num=item_num,
+                            n_negatives=n_neg,
+                        ),
+                        "test/loss_ce": compute_albert4rec_ce_loss(
+                            model=best_model,
+                            session_loader=test_dl,
+                            device=device,
+                            state_size=state_size,
+                            item_num=item_num,
+                            n_negatives=n_neg,
+                        ),
+                    }
+                )
+            elif trainer == "sa2c":
+                with open(str(pop_dict_path), "r") as f:
+                    pop_dict = eval(f.read())
+                v2 = compute_sa2c_losses(
+                    model=best_model,
+                    session_loader=val_dl,
+                    device=device,
+                    state_size=state_size,
+                    item_num=item_num,
+                    purchase_only=purchase_only,
+                    cfg=cfg,
+                    reward_click=reward_click,
+                    reward_buy=reward_buy,
+                    reward_negative=reward_negative,
+                    reward_fn=reward_fn,
+                    pop_dict=pop_dict,
+                    phase="phase2",
+                    ce_vocab_pct=ce_vocab_pct,
+                )
+                t2 = compute_sa2c_losses(
+                    model=best_model,
+                    session_loader=test_dl,
+                    device=device,
+                    state_size=state_size,
+                    item_num=item_num,
+                    purchase_only=purchase_only,
+                    cfg=cfg,
+                    reward_click=reward_click,
+                    reward_buy=reward_buy,
+                    reward_negative=reward_negative,
+                    reward_fn=reward_fn,
+                    pop_dict=pop_dict,
+                    phase="phase2",
+                    ce_vocab_pct=ce_vocab_pct,
+                )
+                log_metrics_dict(
+                    {
+                        "val/loss_phase2": float(v2.total),
+                        "val/loss_phase2_actor": float(v2.actor),
+                        "val/loss_phase2_critic": float(v2.critic),
+                        "test/loss_phase2": float(t2.total),
+                        "test/loss_phase2_actor": float(t2.actor),
+                        "test/loss_phase2_critic": float(t2.critic),
+                    }
+                )
+                if warmup_model is not None and warmup_path is not None and Path(warmup_path).exists():
+                    v1 = compute_sa2c_losses(
+                        model=warmup_model,
+                        session_loader=val_dl,
+                        device=device,
+                        state_size=state_size,
+                        item_num=item_num,
+                        purchase_only=purchase_only,
+                        cfg=cfg,
+                        reward_click=reward_click,
+                        reward_buy=reward_buy,
+                        reward_negative=reward_negative,
+                        reward_fn=reward_fn,
+                        pop_dict=pop_dict,
+                        phase="phase1",
+                        ce_vocab_pct=ce_vocab_pct,
+                    )
+                    t1 = compute_sa2c_losses(
+                        model=warmup_model,
+                        session_loader=test_dl,
+                        device=device,
+                        state_size=state_size,
+                        item_num=item_num,
+                        purchase_only=purchase_only,
+                        cfg=cfg,
+                        reward_click=reward_click,
+                        reward_buy=reward_buy,
+                        reward_negative=reward_negative,
+                        reward_fn=reward_fn,
+                        pop_dict=pop_dict,
+                        phase="phase1",
+                        ce_vocab_pct=ce_vocab_pct,
+                    )
+                    log_metrics_dict(
+                        {
+                            "val/loss_phase1": float(v1.total),
+                            "val/loss_phase1_actor": float(v1.actor),
+                            "val/loss_phase1_critic": float(v1.critic),
+                            "test/loss_phase1": float(t1.total),
+                            "test/loss_phase1_actor": float(t1.actor),
+                            "test/loss_phase1_critic": float(t1.critic),
+                        }
+                    )
+            else:
+                log_metrics_dict(
+                    {
+                        "val/loss_ce": compute_baseline_ce_loss(
+                            model=best_model,
+                            session_loader=val_dl,
+                            device=device,
+                            state_size=state_size,
+                            item_num=item_num,
+                            purchase_only=purchase_only,
+                            cfg=cfg,
+                            ce_vocab_pct=ce_vocab_pct,
+                        ),
+                        "test/loss_ce": compute_baseline_ce_loss(
+                            model=best_model,
+                            session_loader=test_dl,
+                            device=device,
+                            state_size=state_size,
+                            item_num=item_num,
+                            purchase_only=purchase_only,
+                            cfg=cfg,
+                            ce_vocab_pct=ce_vocab_pct,
+                        ),
+                    }
+                )
 
         if is_rank0():
             write_results(
@@ -614,6 +813,8 @@ def _worker_main(
             )
         if is_distributed():
             barrier()
+        if mlflow_active:
+            mlflow.end_run()
         return
 
     if bool(gs_cfg.get("enable", False)):
@@ -662,6 +863,9 @@ def _worker_main(
             train_num_workers=train_num_workers,
             pin_memory=pin_memory,
             max_steps=max_steps,
+            on_train_log=_log_train_losses if mlflow_active else None,
+            on_epoch_end=_log_epoch_metrics if mlflow_active else None,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -697,6 +901,7 @@ def _worker_main(
             max_steps=max_steps,
             reward_fn=reward_fn,
             evaluate_fn=eval_fn,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -743,6 +948,9 @@ def _worker_main(
             ce_loss_vocab_size=ce_loss_vocab_size,
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
+            on_train_log=_log_train_losses if mlflow_active else None,
+            on_epoch_end=_log_epoch_metrics if mlflow_active else None,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -781,6 +989,9 @@ def _worker_main(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
             continue_training=continue_training,
+            on_train_log=_log_train_losses if mlflow_active else None,
+            on_epoch_end=_log_epoch_metrics if mlflow_active else None,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -834,8 +1045,13 @@ def _worker_main(
         ce_vocab_pct=ce_vocab_pct,
     )
 
+    if mlflow_active:
+        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val", metrics=val_best))
+        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test", metrics=test_best))
+
     val_warmup = None
     test_warmup = None
+    warmup_model = None
     if warmup_path is not None and Path(warmup_path).exists() and model_type != "albert4rec":
         warmup_model = SASRecQNetworkRectools(
             item_num=item_num,
@@ -884,6 +1100,147 @@ def _worker_main(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
         )
+        if mlflow_active:
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val_warmup", metrics=val_warmup))
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test_warmup", metrics=test_warmup))
+
+    if mlflow_active:
+        if model_type == "albert4rec":
+            a4 = cfg.get("albert4rec") or {}
+            n_neg = int(a4.get("n_negatives", 256)) if isinstance(a4, dict) else 256
+            log_metrics_dict(
+                {
+                    "val/loss_ce": compute_albert4rec_ce_loss(
+                        model=best_model,
+                        session_loader=val_dl,
+                        device=device,
+                        state_size=state_size,
+                        item_num=item_num,
+                        n_negatives=n_neg,
+                    ),
+                    "test/loss_ce": compute_albert4rec_ce_loss(
+                        model=best_model,
+                        session_loader=test_dl,
+                        device=device,
+                        state_size=state_size,
+                        item_num=item_num,
+                        n_negatives=n_neg,
+                    ),
+                }
+            )
+        elif trainer == "sa2c":
+            with open(str(pop_dict_path), "r") as f:
+                pop_dict = eval(f.read())
+            v2 = compute_sa2c_losses(
+                model=best_model,
+                session_loader=val_dl,
+                device=device,
+                state_size=state_size,
+                item_num=item_num,
+                purchase_only=purchase_only,
+                cfg=cfg,
+                reward_click=reward_click,
+                reward_buy=reward_buy,
+                reward_negative=reward_negative,
+                reward_fn=reward_fn,
+                pop_dict=pop_dict,
+                phase="phase2",
+                ce_vocab_pct=ce_vocab_pct,
+            )
+            t2 = compute_sa2c_losses(
+                model=best_model,
+                session_loader=test_dl,
+                device=device,
+                state_size=state_size,
+                item_num=item_num,
+                purchase_only=purchase_only,
+                cfg=cfg,
+                reward_click=reward_click,
+                reward_buy=reward_buy,
+                reward_negative=reward_negative,
+                reward_fn=reward_fn,
+                pop_dict=pop_dict,
+                phase="phase2",
+                ce_vocab_pct=ce_vocab_pct,
+            )
+            log_metrics_dict(
+                {
+                    "val/loss_phase2": float(v2.total),
+                    "val/loss_phase2_actor": float(v2.actor),
+                    "val/loss_phase2_critic": float(v2.critic),
+                    "test/loss_phase2": float(t2.total),
+                    "test/loss_phase2_actor": float(t2.actor),
+                    "test/loss_phase2_critic": float(t2.critic),
+                }
+            )
+            if warmup_model is not None and warmup_path is not None and Path(warmup_path).exists():
+                v1 = compute_sa2c_losses(
+                    model=warmup_model,
+                    session_loader=val_dl,
+                    device=device,
+                    state_size=state_size,
+                    item_num=item_num,
+                    purchase_only=purchase_only,
+                    cfg=cfg,
+                    reward_click=reward_click,
+                    reward_buy=reward_buy,
+                    reward_negative=reward_negative,
+                    reward_fn=reward_fn,
+                    pop_dict=pop_dict,
+                    phase="phase1",
+                    ce_vocab_pct=ce_vocab_pct,
+                )
+                t1 = compute_sa2c_losses(
+                    model=warmup_model,
+                    session_loader=test_dl,
+                    device=device,
+                    state_size=state_size,
+                    item_num=item_num,
+                    purchase_only=purchase_only,
+                    cfg=cfg,
+                    reward_click=reward_click,
+                    reward_buy=reward_buy,
+                    reward_negative=reward_negative,
+                    reward_fn=reward_fn,
+                    pop_dict=pop_dict,
+                    phase="phase1",
+                    ce_vocab_pct=ce_vocab_pct,
+                )
+                log_metrics_dict(
+                    {
+                        "val/loss_phase1": float(v1.total),
+                        "val/loss_phase1_actor": float(v1.actor),
+                        "val/loss_phase1_critic": float(v1.critic),
+                        "test/loss_phase1": float(t1.total),
+                        "test/loss_phase1_actor": float(t1.actor),
+                        "test/loss_phase1_critic": float(t1.critic),
+                    }
+                )
+        else:
+            log_metrics_dict(
+                {
+                    "val/loss_ce": compute_baseline_ce_loss(
+                        model=best_model,
+                        session_loader=val_dl,
+                        device=device,
+                        state_size=state_size,
+                        item_num=item_num,
+                        purchase_only=purchase_only,
+                        cfg=cfg,
+                        ce_vocab_pct=ce_vocab_pct,
+                    ),
+                    "test/loss_ce": compute_baseline_ce_loss(
+                        model=best_model,
+                        session_loader=test_dl,
+                        device=device,
+                        state_size=state_size,
+                        item_num=item_num,
+                        purchase_only=purchase_only,
+                        cfg=cfg,
+                        ce_vocab_pct=ce_vocab_pct,
+                    ),
+                }
+            )
 
     if is_rank0():
         write_results(
@@ -896,6 +1253,8 @@ def _worker_main(
         )
     if is_distributed():
         barrier()
+    if mlflow_active:
+        mlflow.end_run()
 
 
 def _spawn_entry(

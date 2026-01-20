@@ -4,6 +4,7 @@ import logging
 import math
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -101,6 +102,9 @@ def train_sa2c(
     ce_loss_vocab_size: int | None = None,
     ce_full_vocab_size: int | None = None,
     ce_vocab_pct: float | None = None,
+    on_train_log: Callable[[int, dict[str, float]], None] | None = None,
+    on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_val_end: Callable[[int, dict], None] | None = None,
 ) -> tuple[Path, Path | None]:
     logger = logging.getLogger(__name__)
     with open(str(pop_dict_path), "r") as f:
@@ -208,6 +212,21 @@ def train_sa2c(
     use_auto_warmup = warmup_patience is not None
     stop_training = False
 
+    warmup_steps_cfg = cfg.get("warmup_steps", None)
+    warmup_epochs_cfg = cfg.get("warmup_epochs", 0.0)
+    if warmup_steps_cfg is not None:
+        if warmup_epochs_cfg is not None:
+            raise ValueError("warmup_steps and warmup_epochs are mutually exclusive; set one to null")
+        warmup_steps = int(warmup_steps_cfg)
+        if int(warmup_steps) < 0:
+            raise ValueError("warmup_steps must be null or a non-negative int")
+        warmup_epochs = None
+    else:
+        warmup_steps = None
+        warmup_epochs = None if warmup_epochs_cfg is None else float(warmup_epochs_cfg)
+        if warmup_epochs is not None and float(warmup_epochs) < 0.0:
+            raise ValueError("warmup_epochs must be null or a float >= 0")
+
     best_metric_warmup = float("-inf")
     epochs_since_improve_warmup = 0
     best_warmup_path = run_dir / "best_model_warmup.pt"
@@ -298,6 +317,18 @@ def train_sa2c(
             best_metric_warmup = float(best_metric_overall)
 
     for epoch_idx in range(num_epochs):
+        e_p1_total_sum = 0.0
+        e_p1_actor_sum = 0.0
+        e_p1_critic_sum = 0.0
+        e_p1_tokens = 0
+        e_p2_total_sum = 0.0
+        e_p2_actor_sum = 0.0
+        e_p2_critic_sum = 0.0
+        e_p2_tokens = 0
+
+        epoch_hr10_hits = 0.0
+        epoch_ndcg10_sum = 0.0
+        epoch_metric_tokens = 0
         if num_batches > 0:
             sampler = RandomSampler(train_ds, replacement=True, num_samples=num_batches * int(train_batch_size))
             t0 = time.perf_counter()
@@ -348,10 +379,13 @@ def train_sa2c(
 
             step_count = int(valid_mask.sum().item())
             discount = torch.full((step_count,), float(cfg.get("discount", 0.5)), dtype=torch.float32, device=device)
-            warmup_epochs = float(cfg.get("warmup_epochs", 0.0))
             epoch_progress = float(epoch_idx) + (float(batch_idx) / float(max(1, num_batches)))
+            global_batch_idx = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx)
             if phase == "scheduled":
-                in_warmup = (not resume_phase2) and (epoch_progress < warmup_epochs)
+                if warmup_steps is not None:
+                    in_warmup = (not resume_phase2) and (int(global_batch_idx) < int(warmup_steps))
+                else:
+                    in_warmup = (not resume_phase2) and (warmup_epochs is not None) and (epoch_progress < float(warmup_epochs))
             else:
                 in_warmup = phase == "warmup"
 
@@ -506,6 +540,13 @@ def train_sa2c(
                     ce_loss_pre = F.cross_entropy(ce_logits_c, action_flat, reduction="none")
                     with torch.no_grad():
                         prob = F.softmax(ce_logits_c, dim=1).gather(1, action_flat[:, None]).squeeze(1)
+                    with torch.no_grad():
+                        k = int(min(10, int(ce_logits_c.shape[1])))
+                        topk = ce_logits_c.topk(k=k, dim=1).indices
+                        hit = topk.eq(action_flat[:, None]).any(dim=1)
+                        epoch_hr10_hits += float(hit.to(torch.float32).sum().item())
+                        epoch_ndcg10_sum += float(ndcg_reward_from_logits(ce_logits_c, action_flat).sum().item())
+                        epoch_metric_tokens += int(action_flat.numel())
                 neg_count = int(critic_n_neg_eff)
             else:
                 q_main_seq, ce_main_seq = main_qn(states_x)
@@ -551,6 +592,13 @@ def train_sa2c(
 
                 if ce_n_neg_eff is None:
                     ce_loss_pre = F.cross_entropy(ce_flat, action_flat, reduction="none")
+                    with torch.no_grad():
+                        k = int(min(10, int(ce_flat.shape[1])))
+                        topk = ce_flat.topk(k=k, dim=1).indices
+                        hit = topk.eq(action_flat[:, None]).any(dim=1)
+                        epoch_hr10_hits += float(hit.to(torch.float32).sum().item())
+                        epoch_ndcg10_sum += float(ndcg_reward_from_logits(ce_flat, action_flat).sum().item())
+                        epoch_metric_tokens += int(action_flat.numel())
                 else:
                     base = _unwrap(main_qn)
                     seqs = base.encode_seq(states_x)
@@ -579,6 +627,14 @@ def train_sa2c(
                 loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
                 if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                     raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
+                critic_term = float((qloss_pos + qloss_neg).detach().item())
+                actor_term = float(ce_loss_pre.mean().detach().item())
+                total_term = float(loss.detach().item())
+                if int(step_count) > 0:
+                    e_p1_total_sum += float(total_term) * float(step_count)
+                    e_p1_actor_sum += float(actor_term) * float(step_count)
+                    e_p1_critic_sum += float(critic_term) * float(step_count)
+                    e_p1_tokens += int(step_count)
                 opt1.zero_grad(set_to_none=True)
                 loss.backward()
                 opt1.step()
@@ -607,10 +663,57 @@ def train_sa2c(
                 loss = float(cfg.get("weight", 1.0)) * (qloss_pos + qloss_neg) + ce_loss_post.mean()
                 if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                     raise FloatingPointError(f"Non-finite loss (phase2) at total_step={int(total_step)}")
+                critic_term = float((qloss_pos + qloss_neg).detach().item())
+                actor_term = float(ce_loss_post.mean().detach().item())
+                total_term = float(loss.detach().item())
+                if int(step_count) > 0:
+                    e_p2_total_sum += float(total_term) * float(step_count)
+                    e_p2_actor_sum += float(actor_term) * float(step_count)
+                    e_p2_critic_sum += float(critic_term) * float(step_count)
+                    e_p2_tokens += int(step_count)
                 opt2.zero_grad(set_to_none=True)
                 loss.backward()
                 opt2.step()
                 total_step += int(step_count)
+
+            if on_train_log is not None and int(step_count) > 0:
+                global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
+                if in_warmup:
+                    on_train_log(
+                        int(global_step),
+                        {
+                            "train_per_batch/loss_phase1": float(total_term),
+                            "train_per_batch/loss_phase1_actor": float(actor_term),
+                            "train_per_batch/loss_phase1_critic": float(critic_term),
+                        },
+                    )
+                else:
+                    on_train_log(
+                        int(global_step),
+                        {
+                            "train_per_batch/loss_phase2": float(total_term),
+                            "train_per_batch/loss_phase2_actor": float(actor_term),
+                            "train_per_batch/loss_phase2_critic": float(critic_term),
+                        },
+                    )
+
+        if on_epoch_end is not None:
+            payload: dict[str, float] = {}
+            if int(e_p1_tokens) > 0:
+                denom = float(e_p1_tokens)
+                payload["train/loss_phase1"] = float(e_p1_total_sum / denom)
+                payload["train/loss_phase1_actor"] = float(e_p1_actor_sum / denom)
+                payload["train/loss_phase1_critic"] = float(e_p1_critic_sum / denom)
+            if int(e_p2_tokens) > 0:
+                denom = float(e_p2_tokens)
+                payload["train/loss_phase2"] = float(e_p2_total_sum / denom)
+                payload["train/loss_phase2_actor"] = float(e_p2_actor_sum / denom)
+                payload["train/loss_phase2_critic"] = float(e_p2_critic_sum / denom)
+            if int(epoch_metric_tokens) > 0:
+                payload["train/HR_10"] = float(epoch_hr10_hits / float(epoch_metric_tokens))
+                payload["train/NDCG_10"] = float(epoch_ndcg10_sum / float(epoch_metric_tokens))
+            if payload:
+                on_epoch_end(int(epoch_idx + 1), payload)
 
         val_metrics = eval_fn(
             qn1,
@@ -657,9 +760,13 @@ def train_sa2c(
         if metric_2 > metric_1:
             metric = float(metric_2)
             best_state_for_epoch = _unwrap(qn2).state_dict()
+            val_metrics_best = val_metrics_2
         else:
             metric = float(metric_1)
             best_state_for_epoch = _unwrap(qn1).state_dict()
+            val_metrics_best = val_metrics
+        if on_val_end is not None:
+            on_val_end(int(epoch_idx + 1), val_metrics_best)
         if trial is not None:
             trial.report(float(metric), step=int(epoch_idx))
             if bool(getattr(trial, "should_prune", lambda: False)()):
@@ -739,9 +846,15 @@ def train_sa2c(
                     logger.info("finetune early stopping triggered")
                     break
         else:
-            if (not use_auto_warmup) and (phase == "scheduled") and (not entered_finetune) and float(
-                cfg.get("warmup_epochs", 0.0)
-            ) > 0.0:
+            if (
+                (not use_auto_warmup)
+                and (phase == "scheduled")
+                and (not entered_finetune)
+                and (
+                    (warmup_steps is not None and int(warmup_steps) > 0)
+                    or (warmup_steps is None and warmup_epochs is not None and float(warmup_epochs) > 0.0)
+                )
+            ):
                 if metric > best_metric_warmup:
                     best_metric_warmup = metric
                     best_metric_overall = float(best_metric_warmup)

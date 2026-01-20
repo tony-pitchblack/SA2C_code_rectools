@@ -4,6 +4,7 @@ import logging
 import math
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -13,7 +14,7 @@ from torch.utils.data import RandomSampler
 from ..config import resolve_ce_sampling
 from ..distributed import get_local_rank, get_world_size, is_distributed, is_rank0
 from ..data_utils.sessions import make_session_loader, make_shifted_batch_from_sessions
-from ..metrics import evaluate, get_metric_value
+from ..metrics import evaluate, get_metric_value, ndcg_reward_from_logits
 from ..models import SASRecBaselineRectools
 from ..utils import tqdm
 from .sampling import sample_global_uniform_negatives, sample_uniform_negatives
@@ -44,6 +45,9 @@ def train_baseline(
     ce_full_vocab_size: int | None = None,
     ce_vocab_pct: float | None = None,
     continue_training: bool = False,
+    on_train_log: Callable[[int, dict[str, float]], None] | None = None,
+    on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_val_end: Callable[[int, dict], None] | None = None,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -95,6 +99,11 @@ def train_baseline(
     test_dl_s = 0.0
 
     for epoch_idx in range(num_epochs):
+        epoch_loss_sum = 0.0
+        epoch_tokens = 0
+        epoch_hr10_hits = 0.0
+        epoch_ndcg10_sum = 0.0
+        epoch_metric_tokens = 0
         if num_batches > 0:
             sampler = RandomSampler(train_ds, replacement=True, num_samples=num_batches * int(train_batch_size))
             t0 = time.perf_counter()
@@ -132,6 +141,7 @@ def train_baseline(
                 dynamic_ncols=True,
             )
         ):
+            batch_idx = int(_)
             if max_steps > 0 and total_step >= max_steps:
                 stop_training = True
                 break
@@ -157,6 +167,14 @@ def train_baseline(
                 ce_logits_seq = model(states_x)
                 ce_logits = ce_logits_seq[valid_mask]
                 loss = F.cross_entropy(ce_logits, action_flat)
+
+                with torch.no_grad():
+                    k = int(min(10, int(ce_logits.shape[1])))
+                    topk = ce_logits.topk(k=k, dim=1).indices
+                    hit = topk.eq(action_flat[:, None]).any(dim=1)
+                    epoch_hr10_hits += float(hit.to(torch.float32).sum().item())
+                    epoch_ndcg10_sum += float(ndcg_reward_from_logits(ce_logits, action_flat).sum().item())
+                    epoch_metric_tokens += int(action_flat.numel())
             else:
                 base = model.module if hasattr(model, "module") else model
                 seqs = base.encode_seq(states_x)
@@ -184,10 +202,26 @@ def train_baseline(
             if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                 raise FloatingPointError(f"Non-finite loss (baseline) at total_step={int(total_step)}")
 
+            n_tok = int(action_flat.numel())
+            if n_tok > 0:
+                epoch_loss_sum += float(loss.detach().item()) * float(n_tok)
+                epoch_tokens += int(n_tok)
+
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             total_step += int(valid_mask.sum().item())
+
+            if on_train_log is not None and int(n_tok) > 0:
+                global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
+                on_train_log(int(global_step), {"train_per_batch/loss_ce": float(loss.detach().item())})
+
+        if on_epoch_end is not None and int(epoch_tokens) > 0:
+            payload: dict[str, float] = {"train/loss_ce": float(epoch_loss_sum / float(epoch_tokens))}
+            if int(epoch_metric_tokens) > 0:
+                payload["train/HR_10"] = float(epoch_hr10_hits / float(epoch_metric_tokens))
+                payload["train/NDCG_10"] = float(epoch_ndcg10_sum / float(epoch_metric_tokens))
+            on_epoch_end(int(epoch_idx + 1), payload)
 
         eval_fn = evaluate if evaluate_fn is None else evaluate_fn
         val_metrics = eval_fn(
@@ -207,6 +241,8 @@ def train_baseline(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
         )
+        if on_val_end is not None:
+            on_val_end(int(epoch_idx + 1), val_metrics)
         metric = float(get_metric_value(val_metrics, metric_key))
         if trial is not None:
             trial.report(float(metric), step=int(epoch_idx))
