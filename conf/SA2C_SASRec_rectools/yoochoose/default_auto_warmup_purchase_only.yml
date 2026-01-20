@@ -5,9 +5,9 @@ epoch: 80
 
 purchase_only: true
 
-batch_size_train: 256
+batch_size_train: 3200
 batch_size_val: 256
-num_workers_train: 4
+num_workers_train: 12
 num_workers_val: 0
 device_id: cuda:0
 
