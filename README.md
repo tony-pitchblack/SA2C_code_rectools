@@ -22,3 +22,17 @@ python scripts/plot_test_results.py --max-metric-value 1.0 0.6 0.3
 
 ![persrec_tc5_2025-08-21 bert4rec_eval](results/plots/persrec_tc5_2025-08-21/bert4rec_eval/test_results.png)
 
+### Purchase-only results
+
+#### RetailRocket
+
+![RetailRocket (purchase-only)](results/plots/retailrocket/test_results_purchase_only.png)
+
+#### YooChoose (RC15)
+
+![YooChoose (purchase-only)](results/plots/yoochoose/test_results_purchase_only.png)
+
+#### persrec_tc5_2025-08-21
+
+Purchase-only plot is not available in `results/plots/persrec_tc5_2025-08-21/`.
+
