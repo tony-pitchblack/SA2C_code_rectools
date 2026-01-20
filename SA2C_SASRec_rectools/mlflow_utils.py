@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import mlflow
-import requests
 import torch
 import torch.nn.functional as F
 from dotenv import dotenv_values
@@ -24,13 +23,6 @@ def _strip_wrapping_quotes(s: str) -> str:
     return s
 
 
-def _normalize_mlflow_host(host: str) -> str:
-    h = _strip_wrapping_quotes(host).strip()
-    if h in {"", "0.0.0.0", "::", "[::]"}:
-        return "localhost"
-    return h
-
-
 def setup_mlflow_tracking(*, repo_root: Path, timeout_s: float = 2.0) -> str:
     env_path = repo_root / ".env"
     if not env_path.exists():
@@ -38,15 +30,11 @@ def setup_mlflow_tracking(*, repo_root: Path, timeout_s: float = 2.0) -> str:
     values = dotenv_values(env_path)
     host = values.get("MLFLOW_HOST", "")
     port = values.get("MLFLOW_PORT", "")
-    host = _normalize_mlflow_host(host)
+    host = _strip_wrapping_quotes(host).strip()
     port = _strip_wrapping_quotes(port).strip()
     if not host or not port:
         raise RuntimeError("Missing required .env variables: MLFLOW_HOST and/or MLFLOW_PORT")
     uri = f"http://{host}:{port}"
-
-    r = requests.get(f"{uri}/api/2.0/mlflow/experiments/list", timeout=float(timeout_s))
-    if int(r.status_code) != 200:
-        raise RuntimeError(f"MLflow tracking server not reachable: {uri} (status={int(r.status_code)})")
     mlflow.set_tracking_uri(uri)
     return uri
 
