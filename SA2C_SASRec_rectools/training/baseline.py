@@ -47,6 +47,7 @@ def train_baseline(
     continue_training: bool = False,
     on_train_log: Callable[[int, dict[str, float]], None] | None = None,
     on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_val_end: Callable[[int, dict], None] | None = None,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -240,6 +241,8 @@ def train_baseline(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
         )
+        if on_val_end is not None:
+            on_val_end(int(epoch_idx + 1), val_metrics)
         metric = float(get_metric_value(val_metrics, metric_key))
         if trial is not None:
             trial.report(float(metric), step=int(epoch_idx))

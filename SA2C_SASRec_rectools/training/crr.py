@@ -4,6 +4,7 @@ import logging
 import math
 import time
 from pathlib import Path
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
@@ -49,6 +50,7 @@ def train_crr(
     evaluate_fn=None,
     metric_key: str = "overall.ndcg@10",
     trial=None,
+    on_val_end: Callable[[int, dict], None] | None = None,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -320,6 +322,8 @@ def train_crr(
             epoch=int(epoch_idx + 1),
             num_epochs=int(num_epochs),
         )
+        if on_val_end is not None:
+            on_val_end(int(epoch_idx + 1), val_metrics)
         metric = float(get_metric_value(val_metrics, metric_key))
         if trial is not None:
             trial.report(float(metric), step=int(epoch_idx))

@@ -490,6 +490,11 @@ def _worker_main(
             return
         log_metrics_dict(metrics, step=int(epoch))
 
+    def _log_val_metrics(epoch: int, metrics: dict) -> None:
+        if not mlflow_active:
+            return
+        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="val", metrics=metrics), step=int(epoch))
+
     if eval_only:
         if is_distributed() and (not is_rank0()):
             barrier()
@@ -583,8 +588,8 @@ def _worker_main(
         )
 
         if mlflow_active:
-            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="val", metrics=val_best))
-            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="test", metrics=test_best))
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val", metrics=val_best))
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test", metrics=test_best))
 
         val_warmup = None
         test_warmup = None
@@ -642,8 +647,8 @@ def _worker_main(
                     ce_vocab_pct=ce_vocab_pct,
                 )
                 if mlflow_active:
-                    log_metrics_dict(flatten_eval_metrics_for_mlflow(split="val_warmup", metrics=val_warmup))
-                    log_metrics_dict(flatten_eval_metrics_for_mlflow(split="test_warmup", metrics=test_warmup))
+                    log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val_warmup", metrics=val_warmup))
+                    log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test_warmup", metrics=test_warmup))
 
         if mlflow_active:
             if model_type == "albert4rec":
@@ -846,6 +851,7 @@ def _worker_main(
             max_steps=max_steps,
             on_train_log=_log_train_losses if mlflow_active else None,
             on_epoch_end=_log_epoch_metrics if mlflow_active else None,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -881,6 +887,7 @@ def _worker_main(
             max_steps=max_steps,
             reward_fn=reward_fn,
             evaluate_fn=eval_fn,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -929,6 +936,7 @@ def _worker_main(
             ce_vocab_pct=ce_vocab_pct,
             on_train_log=_log_train_losses if mlflow_active else None,
             on_epoch_end=_log_epoch_metrics if mlflow_active else None,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -969,6 +977,7 @@ def _worker_main(
             continue_training=continue_training,
             on_train_log=_log_train_losses if mlflow_active else None,
             on_epoch_end=_log_epoch_metrics if mlflow_active else None,
+            on_val_end=_log_val_metrics if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -1023,8 +1032,8 @@ def _worker_main(
     )
 
     if mlflow_active:
-        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="val", metrics=val_best))
-        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="test", metrics=test_best))
+        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val", metrics=val_best))
+        log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test", metrics=test_best))
 
     val_warmup = None
     test_warmup = None
@@ -1078,8 +1087,8 @@ def _worker_main(
             ce_vocab_pct=ce_vocab_pct,
         )
         if mlflow_active:
-            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="val_warmup", metrics=val_warmup))
-            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="test_warmup", metrics=test_warmup))
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_val_warmup", metrics=val_warmup))
+            log_metrics_dict(flatten_eval_metrics_for_mlflow(split="best_test_warmup", metrics=test_warmup))
 
     if mlflow_active:
         if model_type == "albert4rec":

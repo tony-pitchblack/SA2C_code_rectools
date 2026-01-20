@@ -104,6 +104,7 @@ def train_sa2c(
     ce_vocab_pct: float | None = None,
     on_train_log: Callable[[int, dict[str, float]], None] | None = None,
     on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_val_end: Callable[[int, dict], None] | None = None,
 ) -> tuple[Path, Path | None]:
     logger = logging.getLogger(__name__)
     with open(str(pop_dict_path), "r") as f:
@@ -759,9 +760,13 @@ def train_sa2c(
         if metric_2 > metric_1:
             metric = float(metric_2)
             best_state_for_epoch = _unwrap(qn2).state_dict()
+            val_metrics_best = val_metrics_2
         else:
             metric = float(metric_1)
             best_state_for_epoch = _unwrap(qn1).state_dict()
+            val_metrics_best = val_metrics
+        if on_val_end is not None:
+            on_val_end(int(epoch_idx + 1), val_metrics_best)
         if trial is not None:
             trial.report(float(metric), step=int(epoch_idx))
             if bool(getattr(trial, "should_prune", lambda: False)()):

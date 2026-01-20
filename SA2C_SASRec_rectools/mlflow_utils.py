@@ -62,7 +62,7 @@ def flatten_eval_metrics_for_mlflow(*, split: str, metrics: dict) -> dict[str, f
             if k == "topk":
                 continue
             try:
-                out[f"{split}_{section}/{_norm_metric_name(str(k))}"] = float(v)
+                out[f"{split}/{section}/{_norm_metric_name(str(k))}"] = float(v)
             except Exception:
                 continue
     return out

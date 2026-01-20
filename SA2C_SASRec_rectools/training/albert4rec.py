@@ -84,6 +84,7 @@ def train_albert4rec(
     metric_key: str = "overall.ndcg@10",
     on_train_log: Callable[[int, dict[str, float]], None] | None = None,
     on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_val_end: Callable[[int, dict], None] | None = None,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -204,6 +205,8 @@ def train_albert4rec(
             epoch=int(epoch_idx + 1),
             num_epochs=int(num_epochs),
         )
+        if on_val_end is not None:
+            on_val_end(int(epoch_idx + 1), val_metrics)
         metric = float(get_metric_value(val_metrics, metric_key))
         if metric > best_metric:
             best_metric = metric
