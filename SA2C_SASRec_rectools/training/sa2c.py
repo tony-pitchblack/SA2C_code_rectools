@@ -4,6 +4,7 @@ import logging
 import math
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -101,6 +102,7 @@ def train_sa2c(
     ce_loss_vocab_size: int | None = None,
     ce_full_vocab_size: int | None = None,
     ce_vocab_pct: float | None = None,
+    on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
 ) -> tuple[Path, Path | None]:
     logger = logging.getLogger(__name__)
     with open(str(pop_dict_path), "r") as f:
@@ -298,6 +300,14 @@ def train_sa2c(
             best_metric_warmup = float(best_metric_overall)
 
     for epoch_idx in range(num_epochs):
+        p1_total_sum = 0.0
+        p1_actor_sum = 0.0
+        p1_critic_sum = 0.0
+        p1_tokens = 0
+        p2_total_sum = 0.0
+        p2_actor_sum = 0.0
+        p2_critic_sum = 0.0
+        p2_tokens = 0
         if num_batches > 0:
             sampler = RandomSampler(train_ds, replacement=True, num_samples=num_batches * int(train_batch_size))
             t0 = time.perf_counter()
@@ -579,6 +589,14 @@ def train_sa2c(
                 loss = qloss_pos + qloss_neg + ce_loss_pre.mean()
                 if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                     raise FloatingPointError(f"Non-finite loss (phase1) at total_step={int(total_step)}")
+                critic_term = float((qloss_pos + qloss_neg).detach().item())
+                actor_term = float(ce_loss_pre.mean().detach().item())
+                total_term = float(loss.detach().item())
+                if int(step_count) > 0:
+                    p1_total_sum += float(total_term) * float(step_count)
+                    p1_actor_sum += float(actor_term) * float(step_count)
+                    p1_critic_sum += float(critic_term) * float(step_count)
+                    p1_tokens += int(step_count)
                 opt1.zero_grad(set_to_none=True)
                 loss.backward()
                 opt1.step()
@@ -607,10 +625,33 @@ def train_sa2c(
                 loss = float(cfg.get("weight", 1.0)) * (qloss_pos + qloss_neg) + ce_loss_post.mean()
                 if bool(cfg.get("debug", False)) and (not torch.isfinite(loss).all()):
                     raise FloatingPointError(f"Non-finite loss (phase2) at total_step={int(total_step)}")
+                critic_term = float((qloss_pos + qloss_neg).detach().item())
+                actor_term = float(ce_loss_post.mean().detach().item())
+                total_term = float(loss.detach().item())
+                if int(step_count) > 0:
+                    p2_total_sum += float(total_term) * float(step_count)
+                    p2_actor_sum += float(actor_term) * float(step_count)
+                    p2_critic_sum += float(critic_term) * float(step_count)
+                    p2_tokens += int(step_count)
                 opt2.zero_grad(set_to_none=True)
                 loss.backward()
                 opt2.step()
                 total_step += int(step_count)
+
+        if on_epoch_end is not None:
+            payload: dict[str, float] = {}
+            if int(p1_tokens) > 0:
+                denom = float(p1_tokens)
+                payload["train/loss_phase1"] = float(p1_total_sum / denom)
+                payload["train/loss_phase1_actor"] = float(p1_actor_sum / denom)
+                payload["train/loss_phase1_critic"] = float(p1_critic_sum / denom)
+            if int(p2_tokens) > 0:
+                denom = float(p2_tokens)
+                payload["train/loss_phase2"] = float(p2_total_sum / denom)
+                payload["train/loss_phase2_actor"] = float(p2_actor_sum / denom)
+                payload["train/loss_phase2_critic"] = float(p2_critic_sum / denom)
+            if payload:
+                on_epoch_end(int(epoch_idx + 1), payload)
 
         val_metrics = eval_fn(
             qn1,
