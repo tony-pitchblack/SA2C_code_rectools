@@ -121,9 +121,6 @@ def train_albert4rec(
     stop_training = False
 
     for epoch_idx in range(num_epochs):
-        log_interval = max(1, int(math.ceil(float(num_batches) * 0.1))) if int(num_batches) > 0 else 1
-        window_loss_sum = 0.0
-        window_tokens = 0
         epoch_loss_sum = 0.0
         epoch_tokens = 0
         if num_batches > 0:
@@ -178,8 +175,6 @@ def train_albert4rec(
 
             n_tok = int(pos.shape[0])
             if n_tok > 0:
-                window_loss_sum += float(loss.detach().item()) * float(n_tok)
-                window_tokens += int(n_tok)
                 epoch_loss_sum += float(loss.detach().item()) * float(n_tok)
                 epoch_tokens += int(n_tok)
 
@@ -188,15 +183,9 @@ def train_albert4rec(
             opt.step()
             total_step += int(pos.shape[0])
 
-            if (
-                on_train_log is not None
-                and int(window_tokens) > 0
-                and ((int(batch_idx + 1) % int(log_interval)) == 0 or int(batch_idx + 1) >= int(num_batches))
-            ):
+            if on_train_log is not None and int(n_tok) > 0:
                 global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
-                on_train_log(int(global_step), {"train_10pct_ep/loss_ce": float(window_loss_sum / float(window_tokens))})
-                window_loss_sum = 0.0
-                window_tokens = 0
+                on_train_log(int(global_step), {"train_per_batch/loss_ce": float(loss.detach().item())})
 
         if on_epoch_end is not None and int(epoch_tokens) > 0:
             on_epoch_end(int(epoch_idx + 1), {"train/loss_ce": float(epoch_loss_sum / float(epoch_tokens))})

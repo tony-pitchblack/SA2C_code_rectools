@@ -301,16 +301,6 @@ def train_sa2c(
             best_metric_warmup = float(best_metric_overall)
 
     for epoch_idx in range(num_epochs):
-        log_interval = max(1, int(math.ceil(float(num_batches) * 0.1))) if int(num_batches) > 0 else 1
-        w_p1_total_sum = 0.0
-        w_p1_actor_sum = 0.0
-        w_p1_critic_sum = 0.0
-        w_p1_tokens = 0
-        w_p2_total_sum = 0.0
-        w_p2_actor_sum = 0.0
-        w_p2_critic_sum = 0.0
-        w_p2_tokens = 0
-
         e_p1_total_sum = 0.0
         e_p1_actor_sum = 0.0
         e_p1_critic_sum = 0.0
@@ -622,10 +612,6 @@ def train_sa2c(
                 actor_term = float(ce_loss_pre.mean().detach().item())
                 total_term = float(loss.detach().item())
                 if int(step_count) > 0:
-                    w_p1_total_sum += float(total_term) * float(step_count)
-                    w_p1_actor_sum += float(actor_term) * float(step_count)
-                    w_p1_critic_sum += float(critic_term) * float(step_count)
-                    w_p1_tokens += int(step_count)
                     e_p1_total_sum += float(total_term) * float(step_count)
                     e_p1_actor_sum += float(actor_term) * float(step_count)
                     e_p1_critic_sum += float(critic_term) * float(step_count)
@@ -662,10 +648,6 @@ def train_sa2c(
                 actor_term = float(ce_loss_post.mean().detach().item())
                 total_term = float(loss.detach().item())
                 if int(step_count) > 0:
-                    w_p2_total_sum += float(total_term) * float(step_count)
-                    w_p2_actor_sum += float(actor_term) * float(step_count)
-                    w_p2_critic_sum += float(critic_term) * float(step_count)
-                    w_p2_tokens += int(step_count)
                     e_p2_total_sum += float(total_term) * float(step_count)
                     e_p2_actor_sum += float(actor_term) * float(step_count)
                     e_p2_critic_sum += float(critic_term) * float(step_count)
@@ -675,29 +657,26 @@ def train_sa2c(
                 opt2.step()
                 total_step += int(step_count)
 
-            if on_train_log is not None and ((int(batch_idx + 1) % int(log_interval)) == 0 or int(batch_idx + 1) >= int(num_batches)):
-                payload: dict[str, float] = {}
-                if int(w_p1_tokens) > 0:
-                    denom = float(w_p1_tokens)
-                    payload["train_10pct_ep/loss_phase1"] = float(w_p1_total_sum / denom)
-                    payload["train_10pct_ep/loss_phase1_actor"] = float(w_p1_actor_sum / denom)
-                    payload["train_10pct_ep/loss_phase1_critic"] = float(w_p1_critic_sum / denom)
-                if int(w_p2_tokens) > 0:
-                    denom = float(w_p2_tokens)
-                    payload["train_10pct_ep/loss_phase2"] = float(w_p2_total_sum / denom)
-                    payload["train_10pct_ep/loss_phase2_actor"] = float(w_p2_actor_sum / denom)
-                    payload["train_10pct_ep/loss_phase2_critic"] = float(w_p2_critic_sum / denom)
-                if payload:
-                    global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
-                    on_train_log(int(global_step), payload)
-                w_p1_total_sum = 0.0
-                w_p1_actor_sum = 0.0
-                w_p1_critic_sum = 0.0
-                w_p1_tokens = 0
-                w_p2_total_sum = 0.0
-                w_p2_actor_sum = 0.0
-                w_p2_critic_sum = 0.0
-                w_p2_tokens = 0
+            if on_train_log is not None and int(step_count) > 0:
+                global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
+                if in_warmup:
+                    on_train_log(
+                        int(global_step),
+                        {
+                            "train_per_batch/loss_phase1": float(total_term),
+                            "train_per_batch/loss_phase1_actor": float(actor_term),
+                            "train_per_batch/loss_phase1_critic": float(critic_term),
+                        },
+                    )
+                else:
+                    on_train_log(
+                        int(global_step),
+                        {
+                            "train_per_batch/loss_phase2": float(total_term),
+                            "train_per_batch/loss_phase2_actor": float(actor_term),
+                            "train_per_batch/loss_phase2_critic": float(critic_term),
+                        },
+                    )
 
         if on_epoch_end is not None:
             payload: dict[str, float] = {}
