@@ -480,10 +480,10 @@ def _worker_main(
         mlflow.start_run(run_name=str(config_name))
         mlflow_active = True
 
-    def _log_epoch_losses(epoch: int, metrics: dict[str, float]) -> None:
+    def _log_train_losses(step: int, metrics: dict[str, float]) -> None:
         if not mlflow_active:
             return
-        log_metrics_dict(metrics, step=int(epoch))
+        log_metrics_dict(metrics, step=int(step))
 
     if eval_only:
         if is_distributed() and (not is_rank0()):
@@ -839,7 +839,7 @@ def _worker_main(
             train_num_workers=train_num_workers,
             pin_memory=pin_memory,
             max_steps=max_steps,
-            on_epoch_end=_log_epoch_losses if mlflow_active else None,
+            on_train_log=_log_train_losses if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -921,7 +921,7 @@ def _worker_main(
             ce_loss_vocab_size=ce_loss_vocab_size,
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
-            on_epoch_end=_log_epoch_losses if mlflow_active else None,
+            on_train_log=_log_train_losses if mlflow_active else None,
         )
         if is_distributed():
             barrier()
@@ -960,7 +960,7 @@ def _worker_main(
             ce_full_vocab_size=ce_full_vocab_size,
             ce_vocab_pct=ce_vocab_pct,
             continue_training=continue_training,
-            on_epoch_end=_log_epoch_losses if mlflow_active else None,
+            on_train_log=_log_train_losses if mlflow_active else None,
         )
         if is_distributed():
             barrier()

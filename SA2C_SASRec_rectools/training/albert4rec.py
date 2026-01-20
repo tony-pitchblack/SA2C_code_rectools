@@ -82,7 +82,7 @@ def train_albert4rec(
     pin_memory: bool,
     max_steps: int,
     metric_key: str = "overall.ndcg@10",
-    on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_train_log: Callable[[int, dict[str, float]], None] | None = None,
 ):
     logger = logging.getLogger(__name__)
     world_size = int(get_world_size())
@@ -120,8 +120,9 @@ def train_albert4rec(
     stop_training = False
 
     for epoch_idx in range(num_epochs):
-        epoch_loss_sum = 0.0
-        epoch_tokens = 0
+        log_interval = max(1, int(math.ceil(float(num_batches) * 0.1))) if int(num_batches) > 0 else 1
+        window_loss_sum = 0.0
+        window_tokens = 0
         if num_batches > 0:
             sampler = RandomSampler(train_ds, replacement=True, num_samples=num_batches * int(train_batch_size))
             t0 = time.perf_counter()
@@ -143,12 +144,14 @@ def train_albert4rec(
             logger.info("build_s train_dl=%.3f", float(train_dl_s))
 
         model.train()
-        for batch in tqdm(
+        for batch_idx, batch in enumerate(
+            tqdm(
             dl,
             total=num_batches,
             desc=f"train epoch {epoch_idx + 1}/{num_epochs}",
             unit="batch",
             dynamic_ncols=True,
+            )
         ):
             if max_steps > 0 and total_step >= max_steps:
                 stop_training = True
@@ -172,16 +175,23 @@ def train_albert4rec(
 
             n_tok = int(pos.shape[0])
             if n_tok > 0:
-                epoch_loss_sum += float(loss.detach().item()) * float(n_tok)
-                epoch_tokens += int(n_tok)
+                window_loss_sum += float(loss.detach().item()) * float(n_tok)
+                window_tokens += int(n_tok)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
             total_step += int(pos.shape[0])
 
-        if on_epoch_end is not None and int(epoch_tokens) > 0:
-            on_epoch_end(int(epoch_idx + 1), {"train/loss_ce": float(epoch_loss_sum / float(epoch_tokens))})
+            if (
+                on_train_log is not None
+                and int(window_tokens) > 0
+                and ((int(batch_idx + 1) % int(log_interval)) == 0 or int(batch_idx + 1) >= int(num_batches))
+            ):
+                global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
+                on_train_log(int(global_step), {"train/loss_ce": float(window_loss_sum / float(window_tokens))})
+                window_loss_sum = 0.0
+                window_tokens = 0
 
         val_metrics = evaluate_albert4rec_loo(
             model,

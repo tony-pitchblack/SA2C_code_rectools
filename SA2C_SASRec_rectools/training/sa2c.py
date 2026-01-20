@@ -102,7 +102,7 @@ def train_sa2c(
     ce_loss_vocab_size: int | None = None,
     ce_full_vocab_size: int | None = None,
     ce_vocab_pct: float | None = None,
-    on_epoch_end: Callable[[int, dict[str, float]], None] | None = None,
+    on_train_log: Callable[[int, dict[str, float]], None] | None = None,
 ) -> tuple[Path, Path | None]:
     logger = logging.getLogger(__name__)
     with open(str(pop_dict_path), "r") as f:
@@ -300,6 +300,7 @@ def train_sa2c(
             best_metric_warmup = float(best_metric_overall)
 
     for epoch_idx in range(num_epochs):
+        log_interval = max(1, int(math.ceil(float(num_batches) * 0.1))) if int(num_batches) > 0 else 1
         p1_total_sum = 0.0
         p1_actor_sum = 0.0
         p1_critic_sum = 0.0
@@ -638,20 +639,29 @@ def train_sa2c(
                 opt2.step()
                 total_step += int(step_count)
 
-        if on_epoch_end is not None:
-            payload: dict[str, float] = {}
-            if int(p1_tokens) > 0:
-                denom = float(p1_tokens)
-                payload["train/loss_phase1"] = float(p1_total_sum / denom)
-                payload["train/loss_phase1_actor"] = float(p1_actor_sum / denom)
-                payload["train/loss_phase1_critic"] = float(p1_critic_sum / denom)
-            if int(p2_tokens) > 0:
-                denom = float(p2_tokens)
-                payload["train/loss_phase2"] = float(p2_total_sum / denom)
-                payload["train/loss_phase2_actor"] = float(p2_actor_sum / denom)
-                payload["train/loss_phase2_critic"] = float(p2_critic_sum / denom)
-            if payload:
-                on_epoch_end(int(epoch_idx + 1), payload)
+            if on_train_log is not None and ((int(batch_idx + 1) % int(log_interval)) == 0 or int(batch_idx + 1) >= int(num_batches)):
+                payload: dict[str, float] = {}
+                if int(p1_tokens) > 0:
+                    denom = float(p1_tokens)
+                    payload["train/loss_phase1"] = float(p1_total_sum / denom)
+                    payload["train/loss_phase1_actor"] = float(p1_actor_sum / denom)
+                    payload["train/loss_phase1_critic"] = float(p1_critic_sum / denom)
+                if int(p2_tokens) > 0:
+                    denom = float(p2_tokens)
+                    payload["train/loss_phase2"] = float(p2_total_sum / denom)
+                    payload["train/loss_phase2_actor"] = float(p2_actor_sum / denom)
+                    payload["train/loss_phase2_critic"] = float(p2_critic_sum / denom)
+                if payload:
+                    global_step = int(epoch_idx) * int(max(1, num_batches)) + int(batch_idx + 1)
+                    on_train_log(int(global_step), payload)
+                p1_total_sum = 0.0
+                p1_actor_sum = 0.0
+                p1_critic_sum = 0.0
+                p1_tokens = 0
+                p2_total_sum = 0.0
+                p2_actor_sum = 0.0
+                p2_critic_sum = 0.0
+                p2_tokens = 0
 
         val_metrics = eval_fn(
             qn1,
