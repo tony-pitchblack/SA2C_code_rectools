@@ -6,6 +6,7 @@
 .cursor/
 .vscode/
 *.code-workspace
+mlflow
 
 data/
 logs/
