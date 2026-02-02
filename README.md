@@ -8,14 +8,6 @@ We also test NDCG-based reward and ablate for purchase-only data.
 
 ![SQN and SA2C](results/misc/snqn_sa2c.png)
 
-## Overview
-
-This repo reproduces results of paper [SA2C](https://arxiv.org/abs/2111.03474) using SASRec implementation based on [RecTools](https://github.com/MobileTeleSystems/RecTools).
-
-We also test NDCG-based reward and ablate for purchase-only data.
-
-![SQN and SA2C](results/misc/snqn_sa2c.png)
-
 ## Contents
 
   - [Clicks and puchases results](#clicks-and-puchases-results)
