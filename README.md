@@ -1,4 +1,12 @@
-# SA2C (SASRec) — Torch + RecTools reimplementation
+# Supervised Advantage Actor-Critic (SA2C)
+
+## Overview
+
+This repo reproduces results of paper [SA2C](https://arxiv.org/abs/2111.03474) using SASRec implementation based on [RecTools](https://github.com/MobileTeleSystems/RecTools).
+
+We also test NDCG-based reward and ablate for purchase-only data.
+
+![SQN and SA2C](results/misc/snqn_sa2c.png)
 
 ## Overview
 
